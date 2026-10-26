@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Editable Nightty palette and font sizes."""
 
 import json

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Existing console transport. No tokens, domain imports, or agent loop."""
 
 import json

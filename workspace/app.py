@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """GTK filesystem Surface. All slow IO is outside GTK's main thread."""
 
 import argparse

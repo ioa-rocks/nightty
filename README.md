@@ -214,3 +214,8 @@ navigation state, copy cancellation/no-clobber, symlink preservation and the
 loopback-only agent client. `./run.sh --smoke --state /tmp/workspace-smoke-state`
 uses disposable files and fake agents, exercises native navigation, preview,
 copying and terminal output, and saves screenshots under `/tmp/`.
+
+## License
+
+Nightty's code, documentation, configuration and bundled artwork are licensed
+under the Mozilla Public License, version 2.0. See [LICENSE](LICENSE).

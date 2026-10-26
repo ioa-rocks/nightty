@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Install user launchers and, optionally, one GNOME keyboard binding."""
 
 import argparse

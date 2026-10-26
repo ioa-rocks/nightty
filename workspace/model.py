@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MPL-2.0
 """Filesystem views and explicit background transfers; no agent execution."""
 
 from dataclasses import dataclass, field
