@@ -8,6 +8,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 
 
 def atomic_json(path, value):
@@ -40,8 +41,19 @@ class State:
     def favourites(self):
         return [Path(p) for p in self.data.get("favourites", []) if isinstance(p, str)]
 
+    @property
+    def recent_folders(self):
+        return [Path(p) for p in self.data.get("recent_folders", []) if isinstance(p, str)]
+
+    def remember_folder(self, path):
+        # Keep recent-folder updates independent of a potentially slow mount.
+        path = os.path.abspath(os.fspath(path))
+        recent = [path, *(str(folder) for folder in self.recent_folders if str(folder) != path)][:16]
+        if recent != self.data.get("recent_folders", []):
+            self.save(recent_folders=recent)
+
     def toggle_favourite(self, path):
-        path = str(Path(path).resolve())
+        path = os.path.abspath(os.fspath(path))
         entries = [str(p) for p in self.favourites]
         if path in entries:
             entries.remove(path)
@@ -99,18 +111,32 @@ def context_for(path):
             "agent": agent, "work": work, "warnings": warnings}
 
 
-def directory_entries(folder, hidden=False):
+def directory_entries(folder, hidden=False, on_batch=None, cancelled=None):
     rows = []
+    batch = []
+    last_batch = time.monotonic()
     with os.scandir(folder) as entries:
         for entry in entries:
+            if cancelled is not None and cancelled():
+                return []
             if not hidden and entry.name.startswith("."):
                 continue
             try:
                 info = entry.stat(follow_symlinks=False)
                 is_directory = entry.is_dir()
-                rows.append((entry.name, is_directory, entry.is_symlink(), info.st_size))
+                executable = stat.S_ISREG(info.st_mode) and bool(info.st_mode & 0o111)
+                row = (entry.name, is_directory, entry.is_symlink(), info.st_size, executable)
             except OSError:
-                rows.append((entry.name, False, entry.is_symlink(), 0))
+                row = (entry.name, False, entry.is_symlink(), 0, False)
+            rows.append(row)
+            if on_batch is not None:
+                batch.append(row)
+                if len(batch) >= 128 or time.monotonic() - last_batch >= 0.08:
+                    on_batch(batch)
+                    batch = []
+                    last_batch = time.monotonic()
+    if on_batch is not None and batch:
+        on_batch(batch)
     return sorted(rows, key=lambda row: (not row[1], row[0].casefold()))
 
 

@@ -1,0 +1,42 @@
+{
+  "palette": {
+    "background": "#073642",
+    "surface": "#002b36",
+    "header": "#002b36",
+    "header_text": "#fdf6e3",
+    "foreground": "#fdf6e3",
+    "terminal_foreground": "#839496",
+    "terminal_background": "#002b36",
+    "muted": "#93a1a1",
+    "subtle": "#657b83",
+    "border": "#586e75",
+    "accent": "#2aa198",
+    "accent_text": "#fdf6e3",
+    "marked": "#b58900",
+    "directory": "#ffffff",
+    "unknown": "#93a1a1",
+    "image": "#859900",
+    "video": "#b58900",
+    "audio": "#cb4b16",
+    "document": "#839496",
+    "source": "#2aa198",
+    "data": "#6c71c4",
+    "archive": "#d33682",
+    "symlink": "#2aa198",
+    "executable": "#859900"
+  },
+  "fonts": {
+    "family": "Monospace",
+    "ui_px": 18,
+    "files_px": 24,
+    "files_weight": 700,
+    "small_px": 16,
+    "heading_px": 24
+  },
+  "ansi": [
+    "#073642", "#dc322f", "#859900", "#b58900",
+    "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+    "#002b36", "#cb4b16", "#586e75", "#657b83",
+    "#839496", "#6c71c4", "#93a1a1", "#fdf6e3"
+  ]
+}

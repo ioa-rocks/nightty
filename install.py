@@ -16,19 +16,29 @@ def main():
     parser.add_argument("--shortcut", help="GNOME accelerator, e.g. F12")
     args = parser.parse_args()
     source = Path(__file__).resolve().parent
-    launcher = Path.home() / ".local/bin/workspace"
-    expected = "#!/bin/sh\nexec " + shlex.quote(str(source / "run.sh")) + ' "$@"\n'
-    if launcher.exists() and launcher.read_text() != expected:
+    launcher = Path.home() / ".local/bin/nightty"
+    desktop = Path.home() / ".local/share/applications/pw.blackbird.SurfaceWorkspace.desktop"
+    owned_desktop = desktop.exists() and "X-Surface-Workspace=true" in desktop.read_text()
+    if desktop.exists() and not owned_desktop:
+        raise SystemExit("An unrelated desktop entry already exists")
+    command = shlex.quote(str(source / "run.sh"))
+    previous = "#!/bin/sh\nexec " + command + ' "$@"\n'
+    expected = "#!/bin/sh\nexec " + command + ' --toggle "$@"\n'
+    allowed_launchers = {previous, expected}
+    if owned_desktop:
+        old_command = shlex.quote(str(source.with_name("Workspace") / "run.sh"))
+        allowed_launchers.update({
+            "#!/bin/sh\nexec " + old_command + ' "$@"\n',
+            "#!/bin/sh\nexec " + old_command + ' --toggle "$@"\n',
+        })
+    if launcher.exists() and launcher.read_text() not in allowed_launchers:
         raise SystemExit(f"Existing launcher left unchanged: {launcher}")
     launcher.parent.mkdir(parents=True, exist_ok=True)
     launcher.write_text(expected)
     launcher.chmod(0o755)
-    desktop = Path.home() / ".local/share/applications/pw.blackbird.SurfaceWorkspace.desktop"
-    if desktop.exists() and "X-Surface-Workspace=true" not in desktop.read_text():
-        raise SystemExit("An unrelated desktop entry already exists")
     desktop.parent.mkdir(parents=True, exist_ok=True)
-    desktop.write_text("[Desktop Entry]\nType=Application\nName=Workspace\n"
-        "Comment=Files, projects and embedded terminals\nIcon=system-file-manager\n"
+    desktop.write_text("[Desktop Entry]\nType=Application\nName=Nightty\n"
+        f"Comment=Files, projects and embedded terminals\nIcon={source / 'assets/nightty-icon-constellation.png'}\n"
         f"Exec={launcher}\nTerminal=false\nCategories=Utility;FileManager;\n"
         "StartupWMClass=pw.blackbird.SurfaceWorkspace\nX-Surface-Workspace=true\n")
     print(f"Launcher installed: {launcher}")
@@ -43,7 +53,7 @@ def main():
         if other != path and ast.literal_eval(settings("get", binding_schema + ":" + other, "binding")) == args.shortcut:
             print(f"{args.shortcut} is already assigned; existing shortcut left unchanged")
             return
-    for field, value in (("name", "Workspace"), ("command", str(launcher)), ("binding", args.shortcut)):
+    for field, value in (("name", "Nightty"), ("command", str(launcher)), ("binding", args.shortcut)):
         settings("set", binding_schema + ":" + path, field, value)
     if path not in entries:
         settings("set", schema, key, repr([*entries, path]))

@@ -6,6 +6,7 @@ import threading
 import unittest
 
 from workspace.agents import Agents
+from workspace.appearance import load_appearance
 from workspace.model import State, Transfer, context_for, directory_entries
 
 
@@ -46,6 +47,26 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(reopened.data["mode"], "project")
         reopened.toggle_favourite(self.root)
         self.assertEqual(State(self.root / "private").favourites, [])
+
+    def test_recent_folders_keep_latest_unique_paths(self):
+        state = State(self.root / "private")
+        folders = [self.root / f"folder-{number}" for number in range(20)]
+        for folder in folders:
+            state.remember_folder(folder)
+        state.remember_folder(folders[10])
+        recent = State(self.root / "private").recent_folders
+        self.assertEqual(recent[0], folders[10])
+        self.assertEqual(len(recent), 16)
+        self.assertEqual(len(set(recent)), 16)
+
+    def test_appearance_file_rejects_invalid_colors(self):
+        appearance = load_appearance()
+        self.assertEqual(appearance["palette"]["background"], "#073642")
+        appearance["palette"]["background"] = "red; background:black"
+        path = self.root / "appearance.json"
+        path.write_text(json.dumps(appearance))
+        with self.assertRaisesRegex(ValueError, "#RRGGBB"):
+            load_appearance(path)
 
     def test_copy_preserves_links_and_refuses_overwrite_and_self_copy(self):
         source, target = self.root / "source", self.root / "target"
@@ -101,6 +122,29 @@ class WorkspaceTests(unittest.TestCase):
         (self.root / ".hidden").write_text("hidden")
         self.assertEqual([r[0] for r in directory_entries(self.root)], ["z-folder", "a.txt"])
         self.assertEqual(len(directory_entries(self.root, True)), 3)
+        script = self.root / "run.sh"
+        script.write_text("#!/bin/sh\n")
+        script.chmod(0o755)
+        (self.root / "link").symlink_to("a.txt")
+        entries = {row[0]: row for row in directory_entries(self.root)}
+        self.assertTrue(entries["z-folder"][1])
+        self.assertTrue(entries["link"][2])
+        self.assertTrue(entries["run.sh"][4])
+        self.assertFalse(entries["a.txt"][4])
+
+    def test_directory_listing_streams_batches_and_stops_after_cancellation(self):
+        for index in range(300):
+            (self.root / f"file-{index:03}").touch()
+        batches = []
+        rows = directory_entries(self.root, on_batch=batches.append)
+        self.assertEqual(len(rows), 300)
+        self.assertEqual(sum(map(len, batches)), 300)
+        self.assertEqual([row[0] for row in rows], sorted(row[0] for row in rows))
+        batches.clear()
+        cancelled = directory_entries(self.root, on_batch=batches.append,
+                                      cancelled=lambda: bool(batches))
+        self.assertEqual(cancelled, [])
+        self.assertEqual(len(batches), 1)
 
     def test_agent_client_rejects_remote_and_credential_bearing_origins(self):
         for origin in ("https://127.0.0.1:8098", "http://remote.invalid", "http://u:p@127.0.0.1", "http://127.0.0.1/api", "http://127.0.0.1#fragment"):
