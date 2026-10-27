@@ -1477,6 +1477,15 @@ class Window(Gtk.ApplicationWindow):
         file_panes.set_end_child(self.right_stack)
         file_panes.set_resize_end_child(True)
         file_panes.set_shrink_end_child(True)
+        # Files is created while the shell is visible. Size the hidden panes
+        # from the live window so their first painted frame uses full columns.
+        width = self.stack.get_allocated_width()
+        if width > 1:
+            usable = max(0, width - 6)
+            left_width = round(usable * self.pane_split_ratio)
+            file_panes.set_position(left_width)
+            for pane, pane_width in zip(self.panes, (left_width, usable - left_width)):
+                pane.view.set_item_width(max(120, (pane_width - 16) // 2))
         file_panes.show()
         self.route_browser_arrows(file_panes)
         self.activate_pane(self.active)

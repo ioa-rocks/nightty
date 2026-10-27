@@ -247,6 +247,9 @@ def smoke(args):
                     assert window.mode == "files"
                     assert window.file_panes is not None and len(window.panes) == 2
                     assert window.gallery_flow is None
+                    expected_first_width = max(120, (window.stack.get_width() // 2 - 40) // 2)
+                    assert all(pane.view.get_item_width() >= expected_first_width
+                               for pane in window.panes)
                     step["startup_checked"] = True
                     return True
                 if step["number"] == 0 and (not window.context or len(window.panes[0].store) < 5
@@ -256,6 +259,8 @@ def smoke(args):
                                             or any(" free" not in pane.folder_stats.get_text()
                                                    for pane in window.panes)
                                             or not window.panes[0].geometry_measured
+                                            or window.panes[0].view.get_cell_rect(
+                                                Gtk.TreePath.new_from_indices([0]), None)[1].y < 0
                                             or window.panes[0].capacity != window.panes[0].visible_capacity()
                                             or window.file_panes.get_width() < 2
                                             or abs(window.file_panes.get_position() /
@@ -370,7 +375,9 @@ def smoke(args):
                         row_rects.append(rect)
                     assert all(rect.height == row_rects[0].height
                                and rect.y == row_rects[0].y + row * pane.item_pitch()
-                               for row, rect in enumerate(row_rects))
+                               for row, rect in enumerate(row_rects)), (
+                                   pane.item_pitch(), pane.capacity, pane.view.get_item_width(),
+                                   [(rect.y, rect.height) for rect in row_rects])
                     viewport = pane.scroll.get_vadjustment().get_page_size()
                     assert row_rects[-2].y + pane.item_pitch() <= viewport
                     assert row_rects[-1].y + pane.item_pitch() > viewport
@@ -1152,7 +1159,7 @@ def smoke(args):
                     step["number"] = 21
                 elif number == 21:
                     pane = window.panes[0]
-                    if pane.path != slow or len(pane.entries) <= 1:
+                    if pane.path != slow or not pane.listed_rows:
                         return True
                     assert "loading" in pane.count.get_text().lower()
                     assert pane.cursor_logical() == 0
