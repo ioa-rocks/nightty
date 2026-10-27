@@ -42,6 +42,11 @@ window.mc-dialog button.mc-dialog-button { background:$background; background-im
 window.mc-dialog button.mc-dialog-default { background:$accent; color:$accent_text; border-color:$accent; }
 window.mc-dialog button.mc-dialog-button:focus { border-color:$accent; }
 window.mc-dialog button.mc-dialog-button:hover { border-color:$foreground; }
+window.mc-dialog.mc-danger-dialog { border-color:#d94e44; }
+window.mc-danger-dialog .mc-dialog-title { color:#ff8378; border-bottom-color:#a83f32; }
+window.mc-danger-dialog .mc-dialog-message { color:#ffbbb3; }
+window.mc-danger-dialog button.mc-danger-default { background:#a83f32; color:#ffffff; border-color:#e36b58; }
+window.mc-danger-dialog button.mc-danger-default:focus { border-color:#ffc2bb; }
 .mc-transfer-fields { padding:20px 26px 12px; }
 .mc-transfer-caption { color:$muted; font-size:${dialog_detail_px}px; font-weight:700; }
 .mc-transfer-value { color:$foreground; font-size:${dialog_message_px}px; padding-bottom:12px; }

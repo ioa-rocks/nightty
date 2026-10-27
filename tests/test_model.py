@@ -10,7 +10,7 @@ from unittest import mock
 
 from workspace.agents import Agents
 from workspace.appearance import load_appearance
-from workspace.model import State, Transfer, context_for, directory_entries
+from workspace.model import Deletion, State, Transfer, context_for, directory_entries
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -172,6 +172,39 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(moved.status, "cancelled")
         self.assertTrue(source.exists())
         self.assertFalse((self.root / "other.bin").exists())
+
+    def test_delete_directory_does_not_follow_symlinks(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("keep")
+        target = self.root / "remove"
+        target.mkdir()
+        (target / "child.txt").write_text("remove")
+        (target / "outside-link").symlink_to(outside, target_is_directory=True)
+        deleted = Deletion([target]).run()
+        self.assertEqual(deleted.status, "completed", deleted.error)
+        self.assertEqual(deleted.files, 3)
+        self.assertFalse(target.exists())
+        self.assertEqual((outside / "keep.txt").read_text(), "keep")
+
+    def test_delete_can_abort_during_directory_traversal(self):
+        target = self.root / "remove"
+        target.mkdir()
+        for index in range(5):
+            (target / f"item-{index}").write_text(str(index))
+
+        class CancelAfterOneItem:
+            calls = 0
+
+            def is_set(self):
+                self.calls += 1
+                return self.calls >= 4
+
+        deleted = Deletion([target], cancel=CancelAfterOneItem()).run()
+        self.assertEqual(deleted.status, "cancelled")
+        self.assertTrue(target.exists())
+        self.assertGreaterEqual(deleted.files, 1)
+        self.assertGreaterEqual(len(list(target.iterdir())), 1)
 
     def test_file_listing_has_stable_directory_first_order_and_hidden_toggle(self):
         (self.root / "z-folder").mkdir()

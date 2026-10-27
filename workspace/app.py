@@ -29,7 +29,7 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, Vte
 
 from .agents import Agents
 from .appearance import load_appearance, stylesheet
-from .model import State, Transfer, context_for, directory_entries
+from .model import Deletion, State, Transfer, context_for, directory_entries
 
 
 class Box(Gtk.Box):
@@ -1350,7 +1350,7 @@ class Window(Gtk.ApplicationWindow):
         self.tab_bar.pack_start(self.terminal_tab_bar, False, False, 0)
         header.pack_start(self.tab_bar)
         self.transfers_button = button("⇄", self.show_jobs)
-        self.transfers_button.set_tooltip_text("Background transfers")
+        self.transfers_button.set_tooltip_text("File operations")
         header.pack_end(self.transfers_button)
         add_tab = button("+ Tab", self.new_terminal)
         add_tab.set_tooltip_text("New shell tab · Ctrl+Shift+T")
@@ -2946,6 +2946,158 @@ class Window(Gtk.ApplicationWindow):
         name_entry.grab_focus()
         return dialog
 
+    def delete(self):
+        pane = self.active
+        sources = self.gallery_selected_paths() if self.mode == "gallery" else pane.operation_paths()
+        sources = [Path(source) for source in sources]
+        if not sources:
+            self.status.set_text("Select a file or mark files to delete (Insert or Ctrl+T).")
+            return
+        source_names = {str(source) for source in sources}
+        positions = [index for index, row in enumerate(pane.entries) if row[3] in source_names]
+        after = next((row[1] for row in pane.entries[max(positions, default=-1) + 1:]
+                      if row[3] not in source_names), None)
+        before = next((row[1] for row in reversed(pane.entries[:min(positions, default=0)])
+                       if row[3] not in source_names), None)
+        restore_name = after or before
+        dialog = Gtk.Window(transient_for=self, modal=True)
+        dialog.set_title("Delete")
+        dialog.set_decorated(False)
+        dialog.set_resizable(False)
+        dialog.add_css_class("mc-dialog")
+        dialog.add_css_class("mc-danger-dialog")
+        content = Box(orientation=Gtk.Orientation.VERTICAL)
+        content.add_css_class("mc-dialog-content")
+        content.set_size_request(640, -1)
+        dialog.set_child(content)
+        content.append(label("DELETE PERMANENTLY", "mc-dialog-title"))
+        source_text = str(sources[0]) if len(sources) == 1 else f"{sources[0]} and {len(sources) - 1} more"
+        message = label(source_text, "mc-dialog-message")
+        message.set_tooltip_text("\n".join(map(str, sources)))
+        content.append(message)
+        detail = label("Selected directories and all their contents will be removed. This cannot be undone.",
+                       "mc-dialog-detail")
+        detail.set_wrap(True)
+        detail.set_ellipsize(Pango.EllipsizeMode.NONE)
+        content.append(detail)
+        actions = Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        actions.add_css_class("mc-dialog-actions")
+        content.append(actions)
+        delete = Gtk.Button(label="_Delete", use_underline=True)
+        cancel = Gtk.Button(label="_Cancel", use_underline=True)
+        for choice in (delete, cancel):
+            choice.add_css_class("mc-dialog-button")
+            choice.set_hexpand(True)
+            actions.append(choice)
+        delete.add_css_class("mc-danger-default")
+        dialog.set_default_widget(delete)
+
+        def begin():
+            dialog.destroy()
+            job = Deletion(sources)
+            job.source_pane_index = pane.index
+            job.restore_name = restore_name
+            self.jobs.append(job)
+            self.transfers_pool.submit(job.run)
+            self.show_delete_progress(job)
+
+        delete.connect("clicked", lambda *_: begin())
+        cancel.connect("clicked", lambda *_: dialog.destroy())
+        connect_key(dialog, lambda _widget, event: (dialog.destroy(), True)[1]
+                    if event.keyval == Gdk.KEY_Escape else False, capture=True)
+        dialog.present()
+        delete.grab_focus()
+        return dialog
+
+    def show_delete_progress(self, job):
+        dialog = Gtk.Window(transient_for=self, modal=True)
+        dialog.set_decorated(False)
+        dialog.set_resizable(False)
+        dialog.add_css_class("mc-dialog")
+        dialog.add_css_class("mc-danger-dialog")
+        content = Box(orientation=Gtk.Orientation.VERTICAL)
+        content.add_css_class("mc-dialog-content")
+        content.set_size_request(600, -1)
+        dialog.set_child(content)
+        content.append(label("DELETING", "mc-dialog-title"))
+        message = label("Starting…", "mc-dialog-message")
+        content.append(message)
+        progress = Gtk.ProgressBar()
+        progress.add_css_class("mc-transfer-progress")
+        content.append(progress)
+        detail = label(str(job.sources[0]), "mc-dialog-detail")
+        detail.set_wrap(True)
+        detail.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        content.append(detail)
+        actions = Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        actions.add_css_class("mc-dialog-actions")
+        content.append(actions)
+        abort = Gtk.Button(label="_Abort", use_underline=True)
+        abort.add_css_class("mc-dialog-button")
+        abort.add_css_class("mc-danger-default")
+        abort.set_hexpand(True)
+        actions.append(abort)
+        dialog.set_default_widget(abort)
+
+        def stop():
+            job.cancel.set()
+            abort.set_sensitive(False)
+            message.set_text("Stopping after the current item…")
+
+        def restore_focus():
+            pane = self.panes[job.source_pane_index]
+            if pane is self.active and self.mode in {"files", "gallery"}:
+                (pane.gallery_flow if self.mode == "gallery" else pane.view).grab_focus()
+            return False
+
+        def finish():
+            dialog.destroy()
+            GLib.idle_add(restore_focus)
+
+        def close_request(_dialog):
+            if job.status in {"queued", "deleting"}:
+                stop()
+                return True
+            GLib.idle_add(restore_focus)
+            return False
+
+        def refresh():
+            if not dialog.get_visible():
+                return False
+            if job.status in {"queued", "deleting"}:
+                if not job.cancel.is_set():
+                    message.set_text(f"{job.files} items removed · {self.size(job.bytes)}")
+                if job.current:
+                    detail.set_text(job.current)
+                progress.pulse()
+                return True
+            message.set_text(f"Delete {job.status}: {job.files} items removed")
+            detail.set_text(job.error or ("Some items were already removed." if job.status == "cancelled"
+                                          else "Finished."))
+            progress.set_fraction(1 if job.status == "completed" else 0)
+            abort.set_label("_Close")
+            abort.set_sensitive(True)
+            return False
+
+        abort.connect("clicked", lambda *_: stop() if job.status in {"queued", "deleting"}
+                      else finish())
+        dialog.connect("close-request", close_request)
+        def dialog_key(_widget, event):
+            if event.keyval == Gdk.KEY_Escape:
+                if job.status in {"queued", "deleting"}:
+                    stop()
+                else:
+                    finish()
+                return True
+            return False
+
+        connect_key(dialog, dialog_key, capture=True)
+        dialog.present()
+        abort.grab_focus()
+        refresh()
+        GLib.timeout_add(120, refresh)
+        return dialog
+
     def copy(self, same_folder=False):
         return self.transfer_dialog("copy", same_folder)
 
@@ -3168,7 +3320,7 @@ class Window(Gtk.ApplicationWindow):
         return job
 
     def update_transfers(self):
-        running = [job for job in self.jobs if job.status in {"queued", "copying", "moving"}]
+        running = [job for job in self.jobs if job.status in {"queued", "copying", "moving", "deleting"}]
         self.transfers_button.set_label(f"⇄ {len(running)}" if running else "⇄")
         for job in self.jobs:
             if job.status in {"completed", "failed", "cancelled"} and not getattr(job, "announced", False):
@@ -3180,30 +3332,40 @@ class Window(Gtk.ApplicationWindow):
                         display.beep()
                         GLib.timeout_add(180, lambda: (display.beep(), False)[1])
                 for pane in self.panes:
-                    refresh_paths = [job.destination]
-                    if job.operation == "move":
+                    refresh_paths = [job.destination] if job.destination is not None else []
+                    if job.operation in {"move", "delete"}:
                         refresh_paths.extend(Path(source).parent for source in job.sources)
                     if any(os.path.abspath(os.fspath(pane.path)) == os.path.abspath(os.fspath(path))
                            for path in refresh_paths):
-                        pane.navigate(pane.path)
+                        selected_name = (getattr(job, "restore_name", None)
+                                         if job.operation == "delete" and pane.index == job.source_pane_index
+                                         else None)
+                        pane.navigate(pane.path, selected_name=selected_name)
                 if self.mode != "files":
-                    self.status.set_text(f"{job.operation.title()} {job.status}: {job.files} files, {self.size(job.bytes)}" + (f" · {job.error}" if job.error else ""))
+                    unit = "items" if job.operation == "delete" else "files"
+                    self.status.set_text(f"{job.operation.title()} {job.status}: {job.files} {unit}, {self.size(job.bytes)}" + (f" · {job.error}" if job.error else ""))
         if self.transfer_alert:
             self.transfers_button.set_label(f"⇄ !{len(running) or ''}")
             self.transfers_button.add_css_class("transfer-alert")
         else:
             self.transfers_button.remove_css_class("transfer-alert")
         if running:
-            progress = f"{len(running)} transfer(s) · " + " · ".join(
-                f"{job.files} files / {self.size(job.bytes)}" for job in running)
+            progress = f"{len(running)} operation(s) · " + " · ".join(
+                f"{job.files} {'items' if job.operation == 'delete' else 'files'} / {self.size(job.bytes)}" for job in running)
             self.transfers_button.set_tooltip_text(progress)
             if self.mode != "files":
                 self.status.set_text(progress)
         else:
-            self.transfers_button.set_tooltip_text("Transfer failed — open for details" if self.transfer_alert else "Background transfers")
+            self.transfers_button.set_tooltip_text("Transfer failed — open for details" if self.transfer_alert else "File operations")
         if hasattr(self, "jobs_label") and self.jobs_label.get_parent():
-            self.jobs_label.set_text("\n\n".join(
-                f"{job.operation.upper()} {job.status.upper()}   {job.files} files · {self.size(job.bytes)}\n{job.destination / (job.target_name or job.sources[0].name)}\n{job.error}" for job in self.jobs) or "No transfers yet.")
+            descriptions = []
+            for job in self.jobs:
+                unit = "items" if job.operation == "delete" else "files"
+                target = (job.sources[0] if job.operation == "delete" else
+                          job.destination / (job.target_name or job.sources[0].name))
+                descriptions.append(f"{job.operation.upper()} {job.status.upper()}   "
+                                    f"{job.files} {unit} · {self.size(job.bytes)}\n{target}\n{job.error}")
+            self.jobs_label.set_text("\n\n".join(descriptions) or "No operations yet.")
             self.cancel_transfers_button.set_sensitive(bool(running))
         return True
 
@@ -3212,15 +3374,15 @@ class Window(Gtk.ApplicationWindow):
             self.transfer_popover = Gtk.Popover()
             self.transfer_popover.set_parent(self.transfers_button)
             content = Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=10)
-            content.pack_start(label("BACKGROUND TRANSFERS", "section"), False, False, 0)
+            content.pack_start(label("FILE OPERATIONS", "section"), False, False, 0)
             self.jobs_label = label("")
             self.jobs_label.set_ellipsize(Pango.EllipsizeMode.NONE)
             self.jobs_label.set_wrap(True)
             jobs_scroll = scrolled(self.jobs_label)
             jobs_scroll.set_size_request(360, 180)
             content.pack_start(jobs_scroll, True, True, 0)
-            self.cancel_transfers_button = button("Cancel running transfers", lambda:
-                [job.cancel.set() for job in self.jobs if job.status in {"queued", "copying", "moving"}])
+            self.cancel_transfers_button = button("Cancel running operations", lambda:
+                [job.cancel.set() for job in self.jobs if job.status in {"queued", "copying", "moving", "deleting"}])
             content.pack_start(self.cancel_transfers_button, False, False, 0)
             self.transfer_popover.set_child(content)
         if self.transfer_popover.get_visible():
@@ -3846,12 +4008,12 @@ class Window(Gtk.ApplicationWindow):
 
     def quit(self, confirmed=False, on_cancel=None):
         active_terminals = any(pid for _terminal, pid in self.terminals)
-        active_jobs = any(j.status in {"queued", "copying", "moving"} for j in self.jobs)
+        active_jobs = any(j.status in {"queued", "copying", "moving", "deleting"} for j in self.jobs)
         if (active_terminals or active_jobs) and not confirmed:
             question = ("Quit Nightty and close its terminals?" if active_terminals
-                        else "Quit Nightty and cancel unfinished transfers?")
+                        else "Quit Nightty and cancel unfinished file operations?")
             confirm(self, question,
-                    "Hiding keeps everything running. Quitting closes embedded terminals and cancels unfinished transfers; completed files are kept.",
+                    "Hiding keeps everything running. Quitting closes embedded terminals and cancels unfinished file operations; completed changes are kept.",
                     lambda: self.quit(confirmed=True), on_cancel)
             return False
         for job in self.jobs:
@@ -3944,6 +4106,8 @@ class Window(Gtk.ApplicationWindow):
             self.move(same_folder=shift)
         elif key == "F7" and self.mode in {"files", "gallery"}:
             self.create_directory()
+        elif key == "F8" and self.mode in {"files", "gallery"}:
+            self.delete()
         else:
             return False
         return True

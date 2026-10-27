@@ -177,6 +177,12 @@ transfer button until the transfer panel is opened. Transfer progress is desktop
 operation state, separate from project tasks.
 
 F7 creates a new directory in the active pane and selects it after refresh.
+F8 permanently deletes marked entries, or the current entry when nothing is
+marked. Its red confirmation states that selected directories are removed
+recursively. Deletion starts without scanning the tree for totals; the progress
+dialog counts items as they are removed and offers Abort. Symbolic links are
+removed without following them. Aborting or encountering an error can leave a
+directory partially deleted, and the operation panel records the result.
 
 ## Controls
 
@@ -222,15 +228,16 @@ F7 creates a new directory in the active pane and selects it after refresh.
   star/unstar that pane's current folder
 - F3: inspect selected file; F4: open with the default application;
   Shift+F5: copy with a same-folder filename; Shift+F6: rename in place;
-  F7: create a directory in the active pane
-- ⇄ in the top bar: transfer progress and cancellation
+  F7: create a directory in the active pane; F8: delete selected or marked items
+- ⇄ in the top bar: file operation progress and cancellation
 - Escape: leave Inspect or inline search; F12: hide; Ctrl+Q: explicit quit
 
 ## Verification
 
 `python3 -m unittest discover -s tests -v` verifies metadata inheritance,
-navigation state, copy and move cancellation/no-clobber, symlink preservation and the
-loopback-only agent client. `./run.sh --smoke --state /tmp/workspace-smoke-state`
+navigation state, copy and move cancellation/no-clobber, deletion abort and
+symlink handling, and the loopback-only agent client.
+`./run.sh --smoke --state /tmp/workspace-smoke-state`
 uses disposable files and fake agents, exercises native navigation, preview,
 copying and terminal output, and saves screenshots under `/tmp/`.
 

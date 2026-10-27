@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MPL-2.0
-"""Filesystem views and explicit background transfers; no agent execution."""
+"""Filesystem views and explicit file operations; no agent execution."""
 
 from dataclasses import dataclass, field
 import ctypes
@@ -273,3 +273,66 @@ class Transfer:
                 Path(temporary).unlink(missing_ok=True)
         else:
             raise ValueError(f"Special file is not copied: {source.name}")
+
+
+@dataclass
+class Deletion:
+    """Delete depth-first, counting only items actually removed."""
+
+    sources: list[Path]
+    status: str = "queued"
+    files: int = 0
+    bytes: int = 0
+    current: str = ""
+    error: str = ""
+    cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+    operation: str = "delete"
+    background: bool = False
+    destination: Path | None = None
+    target_name: str | None = None
+
+    def run(self):
+        self.status = "deleting"
+        try:
+            if not self.sources:
+                raise ValueError("no items selected")
+            for source in self.sources:
+                source = Path(source)
+                if source.parent == source or source.name in {"", ".", ".."}:
+                    raise ValueError(f"Refusing to delete filesystem root: {source}")
+                if self.cancel.is_set():
+                    raise Cancelled()
+                parent_fd = os.open(source.parent, os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    self._delete(parent_fd, source.name, source)
+                finally:
+                    os.close(parent_fd)
+            self.status = "completed"
+        except Cancelled:
+            self.status = "cancelled"
+        except Exception as exc:
+            self.status, self.error = "failed", str(exc)
+        return self
+
+    def _delete(self, parent_fd, name, path):
+        if self.cancel.is_set():
+            raise Cancelled()
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        self.current = str(path)
+        if stat.S_ISDIR(info.st_mode):
+            directory_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                   dir_fd=parent_fd)
+            try:
+                with os.scandir(directory_fd) as entries:
+                    for entry in entries:
+                        self._delete(directory_fd, entry.name, path / entry.name)
+            finally:
+                os.close(directory_fd)
+            if self.cancel.is_set():
+                raise Cancelled()
+            os.rmdir(name, dir_fd=parent_fd)
+        else:
+            os.unlink(name, dir_fd=parent_fd)
+            if stat.S_ISREG(info.st_mode):
+                self.bytes += info.st_size
+        self.files += 1
