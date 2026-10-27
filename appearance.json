@@ -13,7 +13,7 @@
     "accent": "#2aa198",
     "accent_text": "#fdf6e3",
     "marked": "#b58900",
-    "directory": "#ffffff",
+    "directory": "#eee8d5",
     "unknown": "#93a1a1",
     "image": "#859900",
     "video": "#b58900",
@@ -26,10 +26,10 @@
     "executable": "#859900"
   },
   "fonts": {
-    "family": "Monospace",
+    "family": "DejaVu Sans Mono",
     "ui_px": 18,
-    "files_px": 24,
-    "files_weight": 700,
+    "files_px": 26,
+    "files_weight": 400,
     "small_px": 16,
     "heading_px": 24
   },

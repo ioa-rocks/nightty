@@ -24,6 +24,8 @@ backend. The existing browser AgentConsole remains independent.
   through columns on later screenfuls. At the outer edges, Left goes to the first
   entry and Right to the last. Scrolling keeps complete rows aligned and shifts
   the visible range so the last screen fills both columns when enough files exist.
+  File rows use a fixed height based on the configured font, including for names
+  rendered with Japanese or other fallback fonts.
   A double line
   separates panes and a single line separates filename columns. Clicking blank
   pane space focuses
@@ -52,11 +54,11 @@ backend. The existing browser AgentConsole remains independent.
   keeping the selected card.
 - Project mode: the selected folder's inherited context, readable documents,
   images and linked work, using the full window.
-- A real embedded VTE terminal in every tab. Files mode has an MC-style command
-  line: typing from a file pane enters it, Enter runs a command in that tab's
-  shell from the active pane's folder, and a simple `cd` changes that pane's
-  folder. Commands show the shell while they run. At a shell prompt, Ctrl+O
-  switches between shell and the tab's previous view. While another program
+- A real embedded VTE terminal in every tab. Files and Gallery share an MC-style
+  command line: typing from either browser pane enters it. Enter runs a command
+  in that tab's shell from the active pane's folder, and a simple `cd` changes
+  that pane's folder. Commands show the shell while they run. At a shell prompt,
+  Ctrl+O switches between shell and the tab's previous view. While another program
   owns the terminal, Ctrl+O goes to that program, including through SSH.
   Browser navigation itself never injects commands into a running shell or
   agent. Typing `exit` in the final shell tab quits Nightty. Hiding the window
@@ -92,11 +94,13 @@ to work without it.
 
 Colors, font sizes and file name weight live in [appearance.json](appearance.json).
 The terminal shares the file list's family, pixel size and weight. The default
-palette matches the Solarized colors visible in the operator's MC screenshot;
-directories are white, unknown files gray, and recognized types get distinct
-colors. The embedded terminal uses the same 16-color palette, with separate
-normal text and background colors matching the operator's Kitty theme. Edit the
-JSON and restart Nightty, or pass
+font is DejaVu Sans Mono at 26 pixels, regular weight, close to the font resolved
+from the operator's Kitty `monospace` setting at 20 points on a 96 DPI display.
+The palette matches the operator's MC skin through Kitty's Solarized colors:
+directories use Kitty's normal white (`#eee8d5`), unknown files are gray, and
+recognized types get distinct colors. The embedded terminal uses the same
+16-color palette, with separate normal text and background colors matching
+Kitty. Edit the JSON and restart Nightty, or pass
 `--appearance /path/to/appearance.json` to try another palette.
 
 State (favourites, recent folders and last directories) lives under
@@ -183,8 +187,10 @@ move operation is provided in this first prototype; MC is available in a termina
   their own keys.
 - Escape closes an expanded single-file preview or inline search; it leaves
   Gallery, Files and Project open. F12 hides the window.
-- Type in a file pane to use the command line; Enter runs the command and opens
-  its output, while `cd`, `cd ..`, `cd -`, and `cd /path` change the active pane.
+- Type in a Files or Gallery pane to use the command line; Enter runs the command
+  and opens its output, while `cd`, `cd ..`, `cd -`, and `cd /path` change the
+  active pane. Backspace removes the last command character while focus is on a
+  browser pane.
   Up / Down in the command line recall commands; Escape returns to the pane.
 - Ctrl+5: toggle a large quick view in the right pane while browsing the left
 - Alt+1 / Alt+2: locations menu for the left / right pane (favourites and

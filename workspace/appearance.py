@@ -31,6 +31,13 @@ headerbar button.tab-close { color:$muted; padding:5px 5px; }
 headerbar button.tab-close:hover { color:$header_text; }
 button { border-radius:2px; padding:4px 8px; }
 button:checked { background:$accent; color:$accent_text; }
+dialog.mc-dialog { background:$surface; color:$foreground; border:2px solid $accent; border-radius:0; box-shadow:none; font-family:'$family'; font-size:${ui_px}px; }
+.mc-dialog-title { background:$surface; color:$accent; border-bottom:1px solid $border; padding:5px 14px; font-size:${small_px}px; font-weight:700; }
+.mc-dialog-message { color:$foreground; padding:18px 20px 8px; }
+.mc-dialog-detail { color:$muted; font-size:${small_px}px; padding:0 20px 10px; }
+dialog.mc-dialog button.mc-dialog-button { background:$background; background-image:none; color:$foreground; border:1px solid $border; border-radius:0; box-shadow:none; min-width:84px; padding:4px 12px; font-family:'$family'; font-size:${ui_px}px; }
+dialog.mc-dialog button.mc-dialog-default, dialog.mc-dialog button.mc-dialog-button:focus { background:$accent; color:$accent_text; border-color:$accent; }
+dialog.mc-dialog button.mc-dialog-button:hover { border-color:$foreground; }
 entry { background:$surface; color:$foreground; border:1px solid $border; border-radius:0; font-family:'$family'; font-size:${files_px}px; }
 treeview { background:$background; color:$foreground; font-family:'$family'; font-size:${files_px}px; outline-width:0; }
 treeview:selected { background:$accent; color:$accent_text; outline-width:0; }
@@ -60,6 +67,7 @@ entry.command-entry { background:transparent; border:0; box-shadow:none; padding
 flowboxchild { border:2px solid transparent; }
 flowboxchild:selected { background:$accent; border-color:$accent; }
 .gallery-name { font-family:'$family'; font-size:${small_px}px; font-weight:${files_weight}; }
+.gallery-name.gallery-folder-name { font-size:${ui_px}px; }
 .gallery-parent { color:$directory; font-family:'$family'; font-size:64px; font-weight:900; }
 .gallery-excerpt { color:$muted; font-family:'$family'; font-size:${small_px}px; }
 .inspector-details .muted { font-size:${small_px}px; }
