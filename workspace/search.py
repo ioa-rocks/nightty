@@ -25,6 +25,8 @@ class Match:
     symlink: bool
     size: int
     executable: bool
+    modified: float
+    created: float | None = None
 
 
 @dataclass(frozen=True)
@@ -34,15 +36,28 @@ class Outcome:
     skipped: int = 0
 
 
-def describe(path):
+def describe(path, include_created=False):
     path = Path(path)
     info = path.lstat()
+    created = getattr(info, "st_birthtime", None)
+    if include_created and created is None:
+        try:
+            from gi.repository import Gio, GLib
+            file_info = Gio.File.new_for_path(str(path)).query_info(
+                Gio.FILE_ATTRIBUTE_TIME_CREATED,
+                Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, None)
+            if file_info.has_attribute(Gio.FILE_ATTRIBUTE_TIME_CREATED):
+                created = file_info.get_attribute_uint64(Gio.FILE_ATTRIBUTE_TIME_CREATED)
+        except (GLib.Error, OSError):
+            pass
     return Match(path, stat.S_ISDIR(info.st_mode), stat.S_ISLNK(info.st_mode),
-                 info.st_size, stat.S_ISREG(info.st_mode) and bool(info.st_mode & 0o111))
+                 info.st_size, stat.S_ISREG(info.st_mode) and bool(info.st_mode & 0o111),
+                 info.st_mtime, created)
 
 
 def find_names(query, root, scope="tree", hidden=False, on_batch=None,
-               cancelled=None, limit=MAX_RESULTS, plocate_binary=None):
+               cancelled=None, limit=MAX_RESULTS, plocate_binary=None,
+               include_created=False):
     """Stream existing matching paths; scan the tree or query plocate's index."""
     query = query.strip()
     if not query:
@@ -72,7 +87,7 @@ def find_names(query, root, scope="tree", hidden=False, on_batch=None,
         nonlocal count, skipped
         check_cancelled()
         try:
-            match = describe(path)
+            match = describe(path, include_created)
         except OSError:
             skipped += 1
             return False

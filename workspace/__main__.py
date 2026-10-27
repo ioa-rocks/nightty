@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import time
+from unittest.mock import patch
 
 from .app import Gdk, Gio, GLib, Gtk, Window, widget_children
 from .model import State
@@ -25,6 +26,7 @@ def parser():
     result.add_argument("--maximized", action="store_true", help="open the window maximized")
     result.add_argument("--toggle", action="store_true", help="show or hide the running window")
     result.add_argument("--smoke", action="store_true", help="exercise disposable native fixtures and save screenshots")
+    result.add_argument("--smoke-controls", action="store_true", help="check pane menus with disposable native fixtures")
     return result
 
 
@@ -79,7 +81,7 @@ class Application(Gtk.Application):
         return 0
 
 
-def smoke(args):
+def smoke(args, controls_only=False):
     """Runs the real widgets with local fixtures, fake agents and one fixture shell."""
     import cairo
     from .app import Pango, Vte
@@ -206,14 +208,16 @@ def smoke(args):
                                          f"path={getattr(current, 'path', None)} "
                                          f"count={current.count.get_text() if current else None} "
                                          f"cursor={current.view.get_cursor() if current else None} "
+                                         f"focus={app.window.get_focus() if app.window else None} "
+                                         f"right_entries={len(app.window.panes[1].entries) if app.window and app.window.panes else None} "
                                          f"geometry={current.geometry_measured if current else None} "
                                          f"capacity={(current.capacity, current.visible_capacity()) if current else None} "
                                          f"allocations={(current.view.get_allocated_width(), current.view.get_allocated_height()) if current else None} "
                                          f"stack={current.content_stack.get_visible_child_name() if current else None} "
                                          f"scroll={current.scroll.get_vadjustment().get_value() if current else None} "
                                          f"selected={current.selected_paths() if current else None} "
-                         f"gallery={(current.gallery_columns, current.gallery_capacity, app.window.gallery_layout(current), current.gallery_resize_source, current.gallery_building, len(current.gallery_children_by_logical)) if current and current.gallery_flow else None} "
-                                         f"gallery_scroll={(current.gallery_scroll.get_vadjustment().get_upper(), current.gallery_scroll.get_vadjustment().get_page_size(), current.gallery_scroll.get_vadjustment().get_value(), len(widget_children(current.gallery_flow)), [(item.gallery_row, item.get_allocation().y) for item in current.gallery_flow.get_selected_children()]) if current and current.gallery_flow else None} "
+                                         f"gallery={(current.gallery_columns, current.gallery_capacity, app.window.gallery_layout(current), current.gallery_resize_source, current.gallery_building, len(current.gallery_children_by_logical)) if current and getattr(current, 'gallery_flow', None) else None} "
+                                         f"gallery_scroll={(current.gallery_scroll.get_vadjustment().get_upper(), current.gallery_scroll.get_vadjustment().get_page_size(), current.gallery_scroll.get_vadjustment().get_value(), len(widget_children(current.gallery_flow)), [(item.gallery_row, item.get_allocation().y) for item in current.gallery_flow.get_selected_children()]) if current and getattr(current, 'gallery_flow', None) else None} "
                                          f"quick={app.window.quick_details.get_text() if app.window and app.window.quick_enabled else None} "
                                          f"command_ready={getattr(getattr(app.window, 'command_terminal', None), 'workspace_ready', None)} "
                                          f"command_pending={getattr(getattr(app.window, 'command_terminal', None), 'workspace_pending', None)} "
@@ -267,6 +271,139 @@ def smoke(args):
                                             or abs(window.file_panes.get_position() /
                                                    window.file_panes.get_width() - .5) >= .02):
                     return True
+                if controls_only and step["number"] == 0:
+                    pane = window.panes[0]
+                    assert window.workspace_button.get_label() == "Commander ▾"
+                    assert pane.sort_button.get_label() == "n"
+                    assert pane.view_button.get_icon_name() == "view-list-symbolic"
+                    assert pane.sort_button.get_next_sibling() is pane.view_button
+                    assert pane.view_button.get_next_sibling() is pane.location_bar
+                    assert pane.location_bar.get_child() is pane.location
+                    assert pane.locations_button.get_parent() is pane.location_bar
+                    assert pane.find_button.get_parent() is pane.location_bar
+                    assert isinstance(pane.find_button.get_child(), Gtk.Image)
+                    assert "Alt+F7" in pane.find_button.get_tooltip_text()
+                    assert pane.search.get_placeholder_text() == "Go to filename in this folder"
+                    star_before = pane.locations_button.get_icon_name()
+                    pane.favourite()
+                    assert pane.locations_button.get_icon_name() != star_before
+                    pane.favourite()
+                    assert pane.locations_button.get_icon_name() == star_before
+                    pane.set_sort("size")
+                    assert pane.sort_button.get_label() == "s"
+                    pane.set_sort("size")
+                    assert pane.sort_button.get_label() == "S"
+                    pane.set_sort("name")
+                    assert pane.sort_button.get_label() == "n"
+                    screenshot("files-controls")
+                    pane.sort_button.emit("clicked")
+                    step["number"] = 35
+                    return True
+                if controls_only and step["number"] == 35:
+                    pane = window.panes[0]
+                    sort_menu = pane.sort_button.nightty_popover
+                    assert sort_menu.nightty_category == "sort"
+                    assert sort_menu.get_parent() is pane.sort_button
+                    assert sort_menu.get_has_arrow()
+                    assert sort_menu.get_child().get_first_child() is sort_menu.nightty_scroller
+                    assert window.get_focus() is sort_menu.nightty_items[0]
+                    sort_menu.popdown()
+                    window.focus_active_browser()
+                    window.show_workspace_menu()
+                    assert any("Project" in item.get_label()
+                               for item in window.workspace_button.nightty_popover.nightty_items)
+                    window.workspace_button.nightty_popover.popdown()
+                    window.state.save(favourites=[str(child / f"bookmark-{index:02d}")
+                                                  for index in range(28)])
+                    gvfs_root = f"/run/user/{os.getuid()}/gvfs"
+                    native_is_dir, native_scandir = Path.is_dir, os.scandir
+
+                    def no_gvfs_stat(path, *args, **kwargs):
+                        assert os.fspath(path) != gvfs_root, "popup must not stat GVfs on the UI thread"
+                        return native_is_dir(path, *args, **kwargs)
+
+                    def no_gvfs_scan(path):
+                        assert os.fspath(path) != gvfs_root, "popup must not scan GVfs on the UI thread"
+                        return native_scandir(path)
+
+                    with patch.object(Path, "is_dir", no_gvfs_stat), patch.object(os, "scandir", no_gvfs_scan):
+                        assert window.key(window, argparse.Namespace(
+                            keyval=Gdk.KEY_F1, state=Gdk.ModifierType.CONTROL_MASK))
+                        first_menu = pane.locations_button.nightty_popover
+                        assert window.key(window, argparse.Namespace(
+                            keyval=Gdk.KEY_F1, state=Gdk.ModifierType.CONTROL_MASK))
+                        assert first_menu.get_parent() is None
+                    menu = pane.locations_button.nightty_popover
+                    assert menu.nightty_category == "location"
+                    assert any(item.get_label() == "Home" for item in menu.nightty_items)
+                    assert any("current folder" in item.get_label() for item in menu.nightty_items)
+                    assert isinstance(menu.nightty_scroller.get_child(), Gtk.Viewport)
+                    step["number"] = 36
+                    return True
+                if controls_only and step["number"] == 36:
+                    pane = window.panes[0]
+                    menu = pane.locations_button.nightty_popover
+                    for _ in menu.nightty_items:
+                        assert window.pane_menu_key(pane, menu, pane.locations_button, menu,
+                            argparse.Namespace(keyval=Gdk.KEY_Down, state=0))
+                        assert window.get_focus() in menu.nightty_items
+                    assert not pane.view.has_focus()
+                    step["number"] = 37
+                    return True
+                if controls_only and step["number"] == 37:
+                    pane = window.panes[0]
+                    menu = pane.locations_button.nightty_popover
+                    adjustment = menu.nightty_scroller.get_vadjustment()
+                    assert adjustment.get_value() > 0, (adjustment.get_upper(),
+                        adjustment.get_page_size(), adjustment.get_value(),
+                        window.get_focus(), menu.nightty_scroller.get_allocated_height())
+                    focused = window.get_focus()
+                    position = focused.translate_coordinates(menu.nightty_content, 0, 0)
+                    focused_top = position[-1]
+                    assert adjustment.get_value() <= focused_top
+                    assert focused_top + focused.get_allocated_height() <= (
+                        adjustment.get_value() + adjustment.get_page_size())
+                    assert window.pane_menu_key(pane, menu, pane.locations_button, menu,
+                        argparse.Namespace(keyval=Gdk.KEY_Left, state=0))
+                    step["number"] = 38
+                    return True
+                if controls_only and step["number"] == 38:
+                    pane = window.panes[0]
+                    menu = pane.view_button.nightty_popover
+                    assert menu.nightty_category == "view"
+                    assert menu.get_parent() is pane.view_button and menu.get_has_arrow()
+                    assert window.get_focus() is menu.nightty_items[0]
+                    assert any("Gallery" in item.get_label() for item in menu.nightty_items)
+                    assert window.pane_menu_key(pane, menu, pane.view_button, menu,
+                        argparse.Namespace(keyval=Gdk.KEY_Left, state=0))
+                    step["number"] = 39
+                    return True
+                if controls_only and step["number"] == 39:
+                    pane = window.panes[0]
+                    menu = pane.sort_button.nightty_popover
+                    assert menu.nightty_category == "sort" and menu.get_parent() is pane.sort_button
+                    assert window.pane_menu_key(pane, menu, pane.sort_button, menu,
+                        argparse.Namespace(keyval=Gdk.KEY_Right, state=0))
+                    step["number"] = 40
+                    return True
+                if controls_only and step["number"] == 40:
+                    pane = window.panes[0]
+                    menu = pane.view_button.nightty_popover
+                    assert menu.nightty_category == "view" and menu.get_parent() is pane.view_button
+                    assert window.pane_menu_key(pane, menu, pane.view_button, menu,
+                        argparse.Namespace(keyval=Gdk.KEY_Right, state=0))
+                    step["number"] = 41
+                    return True
+                if controls_only and step["number"] == 41:
+                    pane = window.panes[0]
+                    menu = pane.locations_button.nightty_popover
+                    assert menu.nightty_category == "location"
+                    assert menu.get_parent() is pane.locations_button and menu.get_has_arrow()
+                    checks.append("visible mode, location, view, and reversible sort controls")
+                    checks.append("location choices retain visible focus while moving down")
+                    checks.append("popup keys follow Sort, View, Favourites order")
+                    app.quit()
+                    return False
                 if step["number"] == 0 and not step.get("footer_checked"):
                     if not step.get("footer_check_started"):
                         step["footer_before"] = (window.panes[0].status_box.get_height(),
@@ -507,12 +644,12 @@ def smoke(args):
                     assert pane.search_result.get_text() == "1 found"
                     screenshot("search")
                     pane.hide_search()
-                    checks.append("explicit inline filename search")
+                    checks.append("Alt+S quick goto finds a filename in the active pane")
                     window.add_favourite()
                     assert child.resolve() in window.state.favourites
                     locations = window.build_locations_menu(window.panes[0])
                     assert any(item.get_label() == str(child.resolve())
-                               for item in locations.get_child().get_children() if hasattr(item, "get_label"))
+                               for item in locations.nightty_items)
                     window.add_favourite()
                     assert not window.state.favourites
                     window.add_favourite()
@@ -1164,15 +1301,16 @@ def smoke(args):
                     from . import app as app_module
                     original_listing = app_module.directory_entries
 
-                    def delayed_listing(folder, hidden=False, on_batch=None, cancelled=None):
+                    def delayed_listing(folder, hidden=False, on_batch=None, cancelled=None,
+                                        include_created=False):
                         if Path(folder) != slow:
-                            return original_listing(folder, hidden, on_batch, cancelled)
+                            return original_listing(folder, hidden, on_batch, cancelled, include_created)
 
                         def delayed_batch(batch):
                             on_batch(batch)
                             slow_continue.wait()
 
-                        return original_listing(folder, hidden, delayed_batch, cancelled)
+                        return original_listing(folder, hidden, delayed_batch, cancelled, include_created)
 
                     app_module.directory_entries = delayed_listing
                     window.panes[0].navigate(slow)
@@ -1390,6 +1528,39 @@ def smoke(args):
                     step["row_geometry"] = {"top_inset": window.panes[0].top_inset,
                                             "pitch": window.panes[0].row_pitch,
                                             "capacity": window.panes[0].capacity}
+                    pane = window.panes[0]
+                    selected = pane.current_path()
+                    pane.set_sort("size")
+                    assert pane.sort_button.get_label() == "s"
+                    assert pane.current_path() == selected
+                    pane.set_sort("size")
+                    assert pane.sort_button.get_label() == "S"
+                    pane.set_sort("name")
+                    assert pane.sort_button.get_label() == "n"
+                    window.show_workspace_menu()
+                    workspace_menu = window.workspace_button.nightty_popover
+                    assert any("Project" in item.get_label()
+                               for item in workspace_menu.nightty_items)
+                    workspace_menu.popdown()
+                    assert window.key(window, argparse.Namespace(
+                        keyval=Gdk.KEY_F1, state=Gdk.ModifierType.CONTROL_MASK))
+                    menu = pane.locations_button.nightty_popover
+                    assert menu.nightty_category == "location"
+                    step["number"] = 330
+                elif number == 330:
+                    pane = window.panes[0]
+                    menu = pane.locations_button.nightty_popover
+                    assert window.pane_menu_key(pane, menu, pane.locations_button, menu,
+                        argparse.Namespace(keyval=Gdk.KEY_Left, state=0))
+                    step["number"] = 331
+                elif number == 331:
+                    pane = window.panes[0]
+                    menu = pane.view_button.nightty_popover
+                    assert menu.nightty_category == "view"
+                    assert menu.get_parent() is pane.view_button and menu.get_has_arrow()
+                    assert any("Gallery" in item.get_label() for item in menu.nightty_items)
+                    menu.popdown()
+                    checks.append("Ctrl+F1 then Left reaches View; sort reverses and preserves selection")
                     window.terminals[0][0].feed_child(b"exit\n")
                     step["number"] = 34
                 elif number == 34:
@@ -1412,20 +1583,27 @@ def smoke(args):
         app.run([sys.argv[0]])
         slow_continue.set()
         if app.result == 0:
-            assert step["number"] == 35 and not app.window.terminals
-            checks.append("exiting the final shell quits Nightty")
-            print(json.dumps({"checks": checks,
-                "bin_loaded_seconds": step["bin_loaded_seconds"],
-                "row_geometry": step["row_geometry"],
-                "screenshots": ["/tmp/workspace-" + mode + ".png" for mode in ("terminal-start", "footer-japanese", "files", "files-marked", "files-next-page", "files-end", "files-scrolled", "row-boundary", "search", "quick-view", "gallery-top", "gallery", "gallery-resized", "inspect-image", "inspect-pdf", "project", "console", "agents", "command-output", "bin", "slow-partial")]}), flush=True)
+            if controls_only:
+                assert step["number"] == 41
+                print(json.dumps({"checks": checks,
+                                  "screenshots": ["/tmp/workspace-terminal-start.png",
+                                                  "/tmp/workspace-files-controls.png"]}), flush=True)
+            else:
+                assert step["number"] == 35 and not app.window.terminals
+                checks.append("exiting the final shell quits Nightty")
+                print(json.dumps({"checks": checks,
+                    "bin_loaded_seconds": step["bin_loaded_seconds"],
+                    "row_geometry": step["row_geometry"],
+                    "screenshots": ["/tmp/workspace-" + mode + ".png" for mode in ("terminal-start", "footer-japanese", "files", "files-marked", "files-next-page", "files-end", "files-scrolled", "row-boundary", "search", "quick-view", "gallery-top", "gallery", "gallery-resized", "inspect-image", "inspect-pdf", "project", "console", "agents", "command-output", "bin", "slow-partial")]}), flush=True)
         return app.result
 
 
 def main():
     args = parser().parse_args()
     args.left = args.left or args.directory
-    if args.smoke:
-        return smoke(args)
+    if args.smoke or args.smoke_controls:
+        args.smoke = True
+        return smoke(args, controls_only=args.smoke_controls)
     app = Application(args)
     return app.run(sys.argv)
 

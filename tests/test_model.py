@@ -10,7 +10,7 @@ from unittest import mock
 
 from workspace.agents import Agents
 from workspace.appearance import load_appearance
-from workspace.model import Deletion, State, Transfer, context_for, directory_entries
+from workspace.model import Deletion, State, Transfer, context_for, directory_entries, sort_directory_rows
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -238,6 +238,29 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(entries["link"][2])
         self.assertTrue(entries["run.sh"][4])
         self.assertFalse(entries["a.txt"][4])
+
+    def test_panel_sort_keeps_directories_first_and_unknown_creation_last(self):
+        rows = [
+            ("z.txt", False, False, 2, False, 20, None),
+            ("a.md", False, False, 9, False, 10, 100),
+            ("folder", True, False, 0, False, 30, 90),
+            ("b.txt", False, False, 4, False, 40, 110),
+        ]
+        names = lambda result: [row[0] for row in result]
+        self.assertEqual(names(sort_directory_rows(rows, "size")),
+                         ["folder", "z.txt", "b.txt", "a.md"])
+        self.assertEqual(names(sort_directory_rows(rows, "name", True)),
+                         ["folder", "z.txt", "b.txt", "a.md"])
+        self.assertEqual(names(sort_directory_rows(rows, "created", True)),
+                         ["folder", "b.txt", "a.md", "z.txt"])
+
+    def test_creation_sort_uses_optional_creation_metadata(self):
+        target = self.root / "created.txt"
+        target.write_text("timestamp")
+        row = directory_entries(self.root, include_created=True)[0]
+        self.assertEqual(row[0], "created.txt")
+        self.assertEqual(len(row), 7)
+        self.assertTrue(row[6] is None or isinstance(row[6], (int, float)))
 
     def test_directory_listing_streams_batches_and_stops_after_cancellation(self):
         for index in range(300):

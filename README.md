@@ -29,9 +29,14 @@ optional agent backend. The existing browser AgentConsole remains independent.
   A double line
   separates panes and a single line separates filename columns. Clicking blank
   pane space focuses
-  the nearest entry. Each pane's
-  small locations menu contains favourites and recent folders. Ctrl+5 turns
-  the right pane into a large preview of the selected file on the left; the
+  the nearest entry. Each pane header starts with a flat one-letter sort control
+  and a monochrome list/gallery control. A location star and Find magnifier sit
+  inside the editable path field. Lowercase sort letters mean ascending, uppercase descending:
+  n/N for name, e/E for extension, s/S for size, m/M for modified time, and c/C
+  for available creation time. Locations include Home, the filesystem root, mounts
+  that expose a local path, favourites and recent folders.
+  Ctrl+5 turns
+  the right pane into a large preview of the selected item on the left; the
   right folder remains the copy destination. A fixed slot before each name shows
   `/` for directories, `@` for symbolic links, `*` for executables, or a space.
   Going to a parent selects the
@@ -45,8 +50,9 @@ optional agent backend. The existing browser AgentConsole remains independent.
   thumbnail, text excerpt or file type
   icon, plus filename, type, size and image dimensions or modification time. The
   parent directory appears as a large `..` instead of a folder card. Select
-  several items and use F5 to copy or F6 to move them to the other pane. F3 expands one file
-  with type, size, modified time, permissions, location and image dimensions; Escape
+  several items and use F5 to copy or F6 to move them to the other pane. F3 expands a selected
+  file or folder with type, size, modified and available creation time,
+  permissions, owner, location and filesystem space; Escape
   returns from that single-file preview to the gallery or file list. Left and
   Right follow the same sliding columns and screenfuls as the file list. Gallery
   scrolling lands on complete card rows, and the pane hides any partial row below
@@ -186,7 +192,7 @@ directory partially deleted, and the operation panel records the result.
 
 ## Finding files
 
-Alt+F7 or Ctrl+Shift+F opens Find Files; the Find button beside each pane's path
+Alt+F7 or Ctrl+Shift+F opens Find Files; the magnifier inside each pane's path
 does the same. **Current tree (live)** walks the active folder and finds new files
 immediately without following directory symlinks. **All indexed files
 (plocate)** searches the system index by filename; its freshness depends on
@@ -204,6 +210,8 @@ search again; Escape or Close returns to the original folder. This search finds
 
 - Ctrl+PageUp / Ctrl+PageDown: move between workspace tabs; Ctrl+Shift+T: new
   shell tab. All tabs have the same shell controls.
+- The current Shell, Commander or Project mode appears as a dropdown in the top
+  bar; each pane header exposes Sort and View, with locations and Find inside the path.
 - Ctrl+O: switch the current tab between its shell and previous view at the
   shell prompt. During a foreground program, it goes to that program instead;
   Ctrl+Shift+O always sends a literal Ctrl+O to the terminal.
@@ -226,13 +234,18 @@ search again; Escape or Close returns to the original folder. This search finds
   active pane. Backspace removes the last command character while focus is on a
   browser pane.
   Up / Down in the command line recall commands; Escape returns to the pane.
-- Ctrl+5: toggle a large quick view in the right pane while browsing the left
-- Alt+1 / Alt+2: locations menu for the left / right pane (favourites and
-  recent folders); Alt+F1 / Alt+F2 also work if the desktop passes them through
-  (GNOME normally reserves Alt+F2 for Run Command)
-- Alt+S or the small magnifier beside a path: inline filename search in the
-  active pane; Escape closes it. The GTK floating type-ahead box is disabled.
-- Alt+F7 / Ctrl+Shift+F or the Find button: search the current tree live or
+- Ctrl+5: toggle a large quick view in the right pane while browsing the left;
+  View > Preview and info expands its details
+- Ctrl+F1 / Ctrl+F2: open Places for the left / right pane. Inside a pane menu,
+  Left and Right switch Sort, View, and Locations/Favourites in header order;
+  Up and Down move through choices;
+  Enter chooses one and Escape returns to the file list. Long menus scroll to
+  keep the focused choice visible. Each popup points to its header control.
+- Alt+1 / Alt+2 also open Places for the left / right pane. Alt+F1 / Alt+F2
+  work when the desktop passes them through (GNOME normally reserves both).
+- Alt+S: quick goto by filename in the active pane; Escape closes it. The GTK
+  floating type-ahead box is disabled.
+- Alt+F7 / Ctrl+Shift+F or the pane magnifier: search the current tree live or
   search indexed filenames everywhere through plocate
 - Tab / Shift+Tab: switch browser panes and keep keyboard focus in the selected
   pane; Enter: enter a directory or open a file with GNOME's
@@ -242,9 +255,9 @@ search again; Escape or Close returns to the original folder. This search finds
   a mark without moving. F5 copies and F6 moves marked files, or the cursor file.
 - Alt+Up: parent; Ctrl+L: edit the active path; Ctrl+H: hidden files
 - Ctrl+D: star or unstar the active directory
-- Locations menu beside either path: choose a favourite or recent folder, or
-  star/unstar that pane's current folder
-- F3: inspect selected file; F4: open with the default application;
+- The star inside either path: choose Home, a usable mount, favourite or recent
+  folder, or type a path. Its menu toggles the current folder's favourite status.
+- F3: inspect a selected file or folder; F4: open with the default application;
   Shift+F5: copy with a same-folder filename; Shift+F6: rename in place;
   F7: create a directory in the active pane; F8: delete selected or marked items
 - ⇄ in the top bar: file operation progress and cancellation

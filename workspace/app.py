@@ -30,7 +30,7 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, Vte
 
 from .agents import Agents
 from .appearance import load_appearance, stylesheet
-from .model import Deletion, State, Transfer, context_for, directory_entries
+from .model import Deletion, State, Transfer, context_for, directory_entries, sort_directory_rows
 from .search import SearchCancelled, find_names
 
 
@@ -301,27 +301,54 @@ class Pane(Box):
         self.gallery_render_waiters = {}
         self.gallery_pending_target = None
         self.gallery_pending_top = None
+        self.sort_key = "name"
+        self.sort_reverse = False
+        self.created_loaded = False
         toolbar = Box(spacing=5, margin=7)
-        self.locations_button = button("⌄", lambda: self.window.show_locations(self))
-        self.locations_button.set_tooltip_text("Favourites and recent folders (Alt+1 / Alt+2)")
-        toolbar.pack_start(self.locations_button, False, False, 0)
+        self.sort_button = button("n", lambda: self.window.show_pane_menu(self, "sort", self.sort_button))
+        self.sort_button.set_has_frame(False)
+        self.sort_button.add_css_class("pane-header-control")
+        self.sort_button.set_tooltip_text("Sort this pane: name, ascending")
+        toolbar.pack_start(self.sort_button, False, False, 0)
+        self.view_button = Gtk.Button.new_from_icon_name("view-list-symbolic")
+        self.view_button.set_has_frame(False)
+        self.view_button.connect("clicked", lambda *_: self.window.show_pane_menu(self, "view", self.view_button))
+        self.view_button.add_css_class("pane-header-control")
+        self.view_button.set_tooltip_text("View: Files; choose Files, Gallery, or Info")
+        toolbar.pack_start(self.view_button, False, False, 0)
+        self.location_bar = Gtk.Overlay()
         self.location = Gtk.Entry()
+        self.location.add_css_class("pane-address-entry")
         self.location.set_text(str(self.path))
+        self.location.set_width_chars(4)
+        self.location.set_tooltip_text(str(self.path))
         self.location.connect("activate", lambda entry: self.navigate(Path(entry.get_text()).expanduser()))
-        toolbar.pack_start(self.location, True, True, 0)
-        search_button = Gtk.Button()
-        search_button.set_child(Gtk.Image.new_from_icon_name("edit-find-symbolic"))
-        search_button.set_tooltip_text("Search names in this folder (Alt+S)")
-        search_button.connect("clicked", lambda *_: self.show_search())
-        toolbar.pack_start(search_button, False, False, 0)
-        find_button = Gtk.Button(label="Find")
-        find_button.set_tooltip_text("Find files in this tree or the plocate index (Alt+F7)")
-        find_button.connect("clicked", lambda *_: self.window.show_find_dialog(self))
-        toolbar.pack_start(find_button, False, False, 0)
+        self.location_bar.set_child(self.location)
+        self.locations_button = Gtk.Button.new_from_icon_name("non-starred-symbolic")
+        self.locations_button.set_has_frame(False)
+        self.locations_button.connect("clicked", lambda *_: self.window.show_locations(self))
+        self.locations_button.add_css_class("pane-header-control")
+        self.locations_button.add_css_class("pane-address-control")
+        self.locations_button.set_tooltip_text("Locations and favourites (Ctrl+F1 / Ctrl+F2)")
+        self.locations_button.set_halign(Gtk.Align.START)
+        self.locations_button.set_valign(Gtk.Align.CENTER)
+        self.location_bar.add_overlay(self.locations_button)
+        self.find_button = Gtk.Button()
+        self.find_button.set_child(Gtk.Image.new_from_icon_name("edit-find-symbolic"))
+        self.find_button.set_has_frame(False)
+        self.find_button.add_css_class("pane-header-control")
+        self.find_button.add_css_class("pane-address-control")
+        self.find_button.set_tooltip_text("Find files in this tree or the plocate index (Alt+F7)")
+        self.find_button.update_property([Gtk.AccessibleProperty.LABEL], ["Find files"])
+        self.find_button.connect("clicked", lambda *_: self.window.show_find_dialog(self))
+        self.find_button.set_halign(Gtk.Align.END)
+        self.find_button.set_valign(Gtk.Align.CENTER)
+        self.location_bar.add_overlay(self.find_button)
+        toolbar.pack_start(self.location_bar, True, True, 0)
         self.pack_start(toolbar, False, False, 0)
         self.search_row = Box(spacing=6, margin=7)
         self.search = Gtk.SearchEntry()
-        self.search.set_placeholder_text("Search filenames in this folder")
+        self.search.set_placeholder_text("Go to filename in this folder")
         self.search.connect("changed", self.search_changed)
         self.search.connect("activate", lambda *_: self.hide_search())
         connect_key(self.search, self.search_key)
@@ -336,6 +363,7 @@ class Pane(Box):
         self.results_query = ""
         self.results_scope = "tree"
         self.results_matches = []
+        self.results_created_loaded = False
         self.results_saved_marks = set()
         self.results_restore_name = None
         self.results_row = Box(spacing=8, margin=7)
@@ -466,6 +494,8 @@ class Pane(Box):
         restore_name = selected_name if selected_name is not None else self.path.name if path == self.path.parent else None
         self.generation += 1
         generation = self.generation
+        requested_created = self.sort_key == "created"
+        self.created_loaded = False
         self.stop_model_fill()
         if self.scan_flush_source:
             GLib.source_remove(self.scan_flush_source)
@@ -480,6 +510,7 @@ class Pane(Box):
             self.previous_path = self.path
         self.path = path
         self.location.set_text(str(path))
+        self.location.set_tooltip_text(str(path))
         self.count.set_text("Loading…")
         announced = hasattr(self.window, "active") and hasattr(self.window, "status")
         if announced:
@@ -508,8 +539,7 @@ class Pane(Box):
                 except queue.Empty:
                     break
             if changed and hasattr(self.window, "active"):
-                rows = sorted(self.scan_rows, key=lambda row: (not row[1], row[0].casefold()))
-                self.show_directory_rows(rows, loading=True)
+                self.show_directory_rows(self.scan_rows, loading=True)
             return True
 
         self.scan_flush_source = GLib.timeout_add(80, flush)
@@ -517,6 +547,7 @@ class Pane(Box):
         def loaded(rows):
             if generation != self.generation:
                 return
+            self.created_loaded = requested_created
             if self.placeholder_source:
                 GLib.source_remove(self.placeholder_source)
                 self.placeholder_source = 0
@@ -549,13 +580,15 @@ class Pane(Box):
             self.window.refresh_folder_footer(self)
 
         self.window.async_call(lambda: directory_entries(path, self.hidden,
-            on_batch=batches.put, cancelled=lambda: generation != self.generation), loaded, failed,
+            on_batch=batches.put, cancelled=lambda: generation != self.generation,
+            include_created=requested_created), loaded, failed,
             executor=self.window.listing_pool)
 
     def show_directory_rows(self, rows, loading=False):
         path = self.path
         keep_focus = (self is self.window.active and self.window.mode == "files"
                       and self.window.get_focus() is self.view)
+        rows = sort_directory_rows(rows, self.sort_key, self.sort_reverse)
         self.listed_rows = rows
         old_entries = self.entries
         old_cursor_path = None
@@ -569,7 +602,7 @@ class Pane(Box):
             parent = str(path.parent)
             entries.append(["/..", "..", "", parent, self.window.palette["directory"]])
             directories.add(parent)
-        for name, directory, symlink, size, executable in rows:
+        for name, directory, symlink, size, executable, _modified, _created in rows:
             prefix = "@" if symlink else "/" if directory else "*" if executable else ""
             entry_path = str(path / name)
             entries.append([prefix + name, name,
@@ -578,7 +611,8 @@ class Pane(Box):
             if directory:
                 directories.add(entry_path)
         self.entries = entries
-        self.entry_sizes = {str(path / name): size for name, directory, _symlink, size, _exec in rows
+        self.entry_sizes = {str(path / name): size for name, directory, _symlink, size,
+                            _exec, _modified, _created in rows
                             if not directory}
         if not loading:
             self.marked_paths.intersection_update(row[3] for row in entries)
@@ -626,6 +660,7 @@ class Pane(Box):
         self.results_active = True
         self.results_query, self.results_scope = query, scope
         self.results_matches = []
+        self.results_created_loaded = False
         if not preserve_marks:
             self.marked_paths.clear()
         self.generation += 1  # Discard any unfinished directory listing.
@@ -669,7 +704,19 @@ class Pane(Box):
         entries = []
         directories = set()
         sizes = {}
-        for match in self.results_matches:
+        matches = sorted(self.results_matches,
+                         key=lambda match: (match.path.name.casefold(), str(match.path.parent).casefold()))
+        key = self.sort_key
+        if key == "extension":
+            matches.sort(key=lambda match: match.path.suffix.casefold(), reverse=self.sort_reverse)
+        elif key in {"size", "modified", "created"}:
+            matches.sort(key=lambda match: getattr(match, key) or 0, reverse=self.sort_reverse)
+            if key == "created":
+                matches.sort(key=lambda match: match.created is None)
+        elif self.sort_reverse:
+            matches.reverse()
+        matches.sort(key=lambda match: not match.directory)
+        for match in matches:
             path = str(match.path)
             name = match.path.name
             prefix = "@" if match.symlink else "/" if match.directory else "*" if match.executable else ""
@@ -706,6 +753,25 @@ class Pane(Box):
 
     def favourite(self):
         self.window.state.toggle_favourite(self.path)
+        self.window.refresh_star_buttons()
+
+    def set_sort(self, criterion):
+        if criterion == self.sort_key:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_key, self.sort_reverse = criterion, False
+        self.window.refresh_pane_controls(self)
+        if self.results_active:
+            if criterion == "created" and not self.results_created_loaded:
+                self.window.repeat_find(self, reveal=False)
+            else:
+                self.show_result_rows()
+        elif criterion == "created" and not self.created_loaded:
+            self.refresh()
+        else:
+            self.show_directory_rows(self.listed_rows)
+            if self.content_stack.get_visible_child_name() == "gallery":
+                self.window.show_gallery(self)
 
     def show_search(self):
         self.window.set_mode("files")
@@ -1485,6 +1551,9 @@ class Window(Gtk.ApplicationWindow):
         add_tab = button("+ Tab", self.new_terminal)
         add_tab.set_tooltip_text("New shell tab · Ctrl+Shift+T")
         header.pack_end(add_tab)
+        self.workspace_button = button("Shell ▾", self.show_workspace_menu)
+        self.workspace_button.set_tooltip_text("Switch between Shell, Commander, and Project")
+        header.pack_end(self.workspace_button)
         self.set_titlebar(header)
 
         outer = Box(orientation=Gtk.Orientation.VERTICAL)
@@ -1498,6 +1567,7 @@ class Window(Gtk.ApplicationWindow):
         self.initial_browser_state = {
             "paths": (Path(left), Path(right)),
             "pane_modes": ("files", "files"),
+            "sorts": (("name", False), ("name", False)),
             "active": 0,
         }
         self.panes = []
@@ -1608,6 +1678,8 @@ class Window(Gtk.ApplicationWindow):
         self.file_panes = file_panes
         self.stack.add_named(file_panes, "files")
         self.panes = [Pane(self, path, index) for index, path in enumerate(browser["paths"])]
+        for pane in self.panes:
+            self.refresh_pane_controls(pane)
         self.footer_height_group = Gtk.SizeGroup.new(Gtk.SizeGroupMode.VERTICAL)
         for pane in self.panes:
             self.footer_height_group.add_widget(pane.status_box)
@@ -1639,6 +1711,7 @@ class Window(Gtk.ApplicationWindow):
         self.quick_preview_stack.add_named(scrolled(self.quick_image), "image")
         quick.pack_start(self.quick_preview_stack, True, True, 0)
         details_expander = Gtk.Expander(label="Details")
+        self.quick_details_expander = details_expander
         self.quick_details = label("", "muted")
         self.quick_details.set_wrap(True)
         self.quick_details.set_ellipsize(Pango.EllipsizeMode.NONE)
@@ -1799,6 +1872,10 @@ class Window(Gtk.ApplicationWindow):
         return False
 
     def refresh_mode_buttons(self):
+        mode_label = {"console": "Shell ▾", "project": "Project ▾"}.get(
+            self.mode, "Commander ▾")
+        if self.workspace_button.get_label() != mode_label:
+            self.workspace_button.set_label(mode_label)
         for terminal, _pid in self.terminals:
             control = getattr(terminal, "workspace_tab_button", None)
             if control is None:
@@ -1861,18 +1938,24 @@ class Window(Gtk.ApplicationWindow):
         return {
             "paths": tuple(pane.path for pane in self.panes),
             "pane_modes": tuple(pane.content_stack.get_visible_child_name() for pane in self.panes),
+            "sorts": tuple((pane.sort_key, pane.sort_reverse) for pane in self.panes),
             "active": self.active.index,
         }
 
     def restore_browser_state(self, browser):
         if not self.panes:
             return
-        for pane, path, mode in zip(self.panes, browser["paths"], browser["pane_modes"]):
-            if pane.path != path:
+        for pane, path, mode, sorting in zip(self.panes, browser["paths"], browser["pane_modes"],
+                                            browser.get("sorts", (("name", False),) * 2)):
+            pane.sort_key, pane.sort_reverse = sorting
+            if pane.path != path or (pane.sort_key == "created" and not pane.created_loaded):
                 pane.navigate(path)
+            elif pane.listed_rows and not pane.results_active:
+                pane.show_directory_rows(pane.listed_rows)
             if mode == "gallery":
                 self.ensure_gallery()
             pane.content_stack.set_visible_child_name(mode)
+            self.refresh_pane_controls(pane)
             if mode == "gallery":
                 self.show_gallery(pane)
         self.activate_pane(self.panes[browser["active"]], update=False)
@@ -1921,6 +2004,7 @@ class Window(Gtk.ApplicationWindow):
         if not hasattr(self, "active") or not hasattr(self, "global_status"):
             return
         self.state.save(left=str(self.panes[0].path), right=str(self.panes[1].path))
+        self.refresh_pane_controls(pane)
         self.refresh_folder_footer(pane, request_space=True)
         self.refresh_file_footer(pane)
         if pane is not self.active:
@@ -2109,46 +2193,270 @@ class Window(Gtk.ApplicationWindow):
             self.status.set_text(str(path))
         self.async_call(load, loaded)
 
-    def build_locations_menu(self, pane):
+    def refresh_pane_controls(self, pane):
+        names = {"name": "Name", "extension": "Ext", "size": "Size",
+                 "modified": "Modified", "created": "Created"}
+        short = {"name": "n", "extension": "e", "size": "s",
+                 "modified": "m", "created": "c"}
+        sort_label = short[pane.sort_key].upper() if pane.sort_reverse else short[pane.sort_key]
+        if pane.sort_button.get_label() != sort_label:
+            pane.sort_button.set_label(sort_label)
+        direction = "descending" if pane.sort_reverse else "ascending"
+        pane.sort_button.set_tooltip_text(f"Sort: {names[pane.sort_key]}, {direction}; uppercase reverses order")
+        pane.sort_button.update_property([Gtk.AccessibleProperty.LABEL],
+                                         [f"Sort: {names[pane.sort_key]}, {direction}"])
+        gallery = pane.content_stack.get_visible_child_name() == "gallery"
+        view_icon = "view-grid-symbolic" if gallery else "view-list-symbolic"
+        if pane.view_button.get_icon_name() != view_icon:
+            pane.view_button.set_icon_name(view_icon)
+        pane.view_button.set_tooltip_text(
+            f"View: {'Gallery' if gallery else 'Files'}; choose Files, Gallery, or Info")
+        pane.view_button.update_property([Gtk.AccessibleProperty.LABEL],
+                                         [f"View: {'Gallery' if gallery else 'Files'}"])
+        starred = Path(os.path.abspath(os.fspath(pane.path))) in self.state.favourites
+        star_icon = "starred-symbolic" if starred else "non-starred-symbolic"
+        if pane.locations_button.get_icon_name() != star_icon:
+            pane.locations_button.set_icon_name(star_icon)
+        pane.locations_button.set_tooltip_text(
+            f"Locations and favourites; {'saved' if starred else 'not saved'} (Ctrl+D toggles)")
+        pane.locations_button.update_property([Gtk.AccessibleProperty.LABEL],
+            [f"Locations and favourites; current folder {'saved' if starred else 'not saved'}"])
+
+    def refresh_star_buttons(self):
+        for pane in self.panes:
+            self.refresh_pane_controls(pane)
+
+    def new_pane_menu(self, _pane, category):
         menu = Gtk.Popover()
-        content = Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin=8)
-        favourites = self.state.favourites
+        menu.set_has_arrow(True)
+        menu.nightty_category = category
+        menu.nightty_items = []
+        shell = Box(orientation=Gtk.Orientation.VERTICAL, margin=9)
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroll.set_propagate_natural_height(True)
+        scroll.set_max_content_height(480)
+        content = Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        scroll.set_child(content)
+        viewport = scroll.get_child()
+        if isinstance(viewport, Gtk.Viewport):
+            viewport.set_scroll_to_focus(True)
+        shell.append(scroll)
+        menu.nightty_scroller = scroll
+        menu.nightty_content = content
+        menu.set_child(shell)
+        return menu, content
+
+    @staticmethod
+    def menu_choice(menu, content, title, callback):
+        item = button(title, callback)
+        item.add_css_class("pane-menu-item")
+        item.set_halign(Gtk.Align.FILL)
+        item.get_child().set_max_width_chars(46)
+        item.get_child().set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        item.get_child().set_xalign(0)
+        content.append(item)
+        menu.nightty_items.append(item)
+        return item
+
+    def build_locations_menu(self, pane):
+        menu, content = self.new_pane_menu(pane, "location")
         current = Path(os.path.abspath(os.fspath(pane.path)))
+        favourites = self.state.favourites
         recent = [path for path in self.state.recent_folders
                   if path != current and path not in favourites][:12]
 
+        path_entry = Gtk.Entry()
+        path_entry.set_text(str(current))
+        path_entry.set_placeholder_text("Type a folder path")
+        content.append(path_entry)
+
+        def go(path):
+            menu.popdown()
+            pane.navigate(path)
+            self.focus_active_browser()
+
+        path_entry.connect("activate", lambda entry: go(Path(entry.get_text()).expanduser()))
+
+        self.menu_choice(menu, content,
+            "★  Remove current folder from favourites" if current in favourites
+            else "☆  Add current folder to favourites",
+            lambda: (menu.popdown(), pane.favourite(), self.focus_active_browser()))
+
         def section(title, paths):
-            heading = label(title, "section")
-            content.append(heading)
+            content.append(label(title, "section"))
             if not paths:
                 content.append(label("None yet", "muted"))
-            for path in paths:
-                content.append(button(str(path),
-                    lambda target=path: (pane.navigate(target), menu.popdown())))
+            for name, path in paths:
+                item = self.menu_choice(menu, content, name, lambda target=path: go(target))
+                item.set_tooltip_text(str(path))
 
-        section("Favourites", favourites)
+        section("Local", [("Home", Path.home()), ("Filesystem /", Path("/"))])
+        mounts = []
+        seen = {str(Path.home()), "/"}
+        for mount in Gio.VolumeMonitor.get().get_mounts():
+            root = mount.get_root()
+            path = root.get_path()
+            if path and path not in seen:
+                seen.add(path)
+                mounts.append((f"{mount.get_name()}  ·  {root.get_uri()}", Path(path)))
+        if mounts:
+            section("Mounted locations", mounts)
+        section("Favourites", [(str(path), path) for path in favourites])
+        section("Recent folders", [(str(path), path) for path in recent])
+        return menu
+
+    def build_sort_menu(self, pane):
+        menu, content = self.new_pane_menu(pane, "sort")
+        for key, title in (("name", "Name"), ("extension", "Extension"),
+                           ("size", "Size"), ("modified", "Modified"),
+                           ("created", "Created")):
+            suffix = f"  {'↓' if pane.sort_reverse else '↑'}" if pane.sort_key == key else ""
+            prefix = "●  " if pane.sort_key == key else "    "
+            self.menu_choice(menu, content, prefix + title + suffix,
+                lambda criterion=key: (menu.popdown(), pane.set_sort(criterion),
+                                       self.focus_active_browser()))
+        content.append(label("Select the current sort again to reverse it.", "muted"))
+        content.append(label("Files without creation time appear last.", "muted"))
+        return menu
+
+    def build_view_menu(self, pane):
+        menu, content = self.new_pane_menu(pane, "view")
+        current = pane.content_stack.get_visible_child_name()
+        for mode, title, shortcut in (("files", "Files", "Ctrl+1"),
+                                      ("gallery", "Gallery", "Ctrl+I")):
+            prefix = "●  " if current == mode else "    "
+            self.menu_choice(menu, content, f"{prefix}{title}    {shortcut}",
+                lambda target=mode: (menu.popdown(), self.select_pane_view(pane, target)))
         content.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-        section("Recent folders", recent)
-        content.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
-        content.append(button("★  Star this folder" if current not in favourites else "☆  Unstar this folder",
-                              lambda: (pane.favourite(), menu.popdown())))
-        menu.set_child(content)
+        self.menu_choice(menu, content, "Preview and info on right    Ctrl+5",
+                         lambda: (menu.popdown(), self.show_quick_info()))
+        self.menu_choice(menu, content, "Full details    F3",
+                         lambda: (menu.popdown(), self.preview()))
+        return menu
+
+    def pane_menu_key(self, pane, menu, _anchor, _widget, event):
+        key = Gdk.keyval_name(event.keyval)
+        focus = self.get_focus()
+        if key == "Escape":
+            menu.popdown()
+            self.focus_active_browser()
+            return True
+        categories = ("sort", "view", "location")
+        if key in {"Left", "Right", "KP_Left", "KP_Right"}:
+            if isinstance(focus, Gtk.Entry):
+                return False
+            step = -1 if "Left" in key else 1
+            target = categories[(categories.index(menu.nightty_category) + step) % len(categories)]
+            GLib.idle_add(lambda: (self.show_pane_menu(pane, target), False)[1])
+            return True
+        if key in {"Up", "Down", "KP_Up", "KP_Down"} and menu.nightty_items:
+            items = menu.nightty_items
+            step = -1 if "Up" in key else 1
+            index = items.index(focus) if focus in items else (-1 if step > 0 else 0)
+            target = items[(index + step) % len(items)]
+            target.grab_focus()
+            translated = target.translate_coordinates(menu.nightty_content, 0, 0)
+            located, top = ((translated[0], translated[2]) if len(translated) == 3
+                            else (True, translated[1]))
+            adjustment = menu.nightty_scroller.get_vadjustment()
+            if located and top is not None and adjustment.get_page_size() > 0:
+                bottom = top + target.get_allocated_height()
+                if top < adjustment.get_value():
+                    adjustment.set_value(top)
+                elif bottom > adjustment.get_value() + adjustment.get_page_size():
+                    adjustment.set_value(bottom - adjustment.get_page_size())
+            return True
+        return False
+
+    def discard_pane_menu(self, menu):
+        anchor = getattr(menu, "nightty_anchor", None)
+        menu.popdown()
+        if menu.get_parent() is not None:
+            menu.unparent()
+        if anchor is not None and getattr(anchor, "nightty_popover", None) is menu:
+            anchor.nightty_popover = None
+        if self.active_pane_popover is menu:
+            self.active_pane_popover = None
+
+    def show_pane_menu(self, pane, category="location", anchor=None):
+        if anchor is None and pane.index == 1 and self.quick_enabled and self.mode == "files":
+            anchor = self.quick_dest_button
+        anchor = anchor or {"sort": pane.sort_button, "location": pane.locations_button,
+                            "view": pane.view_button}[category]
+        if anchor is not getattr(self, "quick_dest_button", None):
+            self.activate_pane(pane)
+        menu = {"sort": self.build_sort_menu, "location": self.build_locations_menu,
+                "view": self.build_view_menu}[category](pane)
+        menu.nightty_anchor = anchor
+        connect_key(menu, lambda widget, event: self.pane_menu_key(pane, menu, anchor, widget, event),
+                    capture=True)
+        previous_active = getattr(self, "active_pane_popover", None)
+        if previous_active is not None:
+            self.discard_pane_menu(previous_active)
+        previous = getattr(anchor, "nightty_popover", None)
+        if previous is not None and previous is not previous_active:
+            self.discard_pane_menu(previous)
+        anchor.nightty_popover = menu
+        self.active_pane_popover = menu
+        menu.set_parent(anchor)
+        menu.popup()
+        GLib.idle_add(lambda: (menu.nightty_items[0].grab_focus(), False)[1]
+                      if menu.get_parent() is anchor and menu.nightty_items else False)
         return menu
 
     def show_locations(self, pane, anchor=None):
-        menu = self.build_locations_menu(pane)
-        anchor = anchor or (self.quick_dest_button if pane.index == 1 and self.quick_enabled and self.mode == "files"
-                            else pane.locations_button)
-        previous = getattr(anchor, "nightty_popover", None)
+        if anchor is None and pane.index == 1 and self.quick_enabled and self.mode == "files":
+            anchor = self.quick_dest_button
+        return self.show_pane_menu(pane, "location", anchor)
+
+    def show_quick_info(self):
+        if self.mode != "files":
+            self.set_mode("files")
+        if self.active is not self.panes[0]:
+            self.activate_pane(self.panes[0])
+        if not self.quick_enabled:
+            self.toggle_quick_view()
+        self.quick_details_expander.set_expanded(True)
+
+    def select_pane_view(self, pane, mode):
+        if pane.index == 1 and self.quick_enabled:
+            self.toggle_quick_view()
+        self.activate_pane(pane)
+        self.set_mode(mode)
+
+    def show_workspace_menu(self):
+        menu = Gtk.Popover()
+        menu.nightty_items = []
+        content = Box(orientation=Gtk.Orientation.VERTICAL, spacing=3, margin=9)
+        current = ("console" if self.mode == "console" else
+                   "project" if self.mode == "project" else "files")
+        for mode, title, shortcut in (("console", "Shell", "Ctrl+O"),
+                                      ("files", "Commander", "Ctrl+1"),
+                                      ("project", "Project", "Ctrl+P")):
+            prefix = "●  " if mode == current else "    "
+            def choose(target=mode):
+                menu.popdown()
+                if target == "files" and self.mode in {"files", "gallery"}:
+                    self.focus_active_browser()
+                elif target == "files":
+                    self.set_mode(self.output_return_mode if self.output_return_mode in
+                                  {"files", "gallery"} else "files")
+                else:
+                    self.set_mode(target)
+            self.menu_choice(menu, content, f"{prefix}{title}    {shortcut}", choose)
+        menu.set_child(content)
+        previous = getattr(self.workspace_button, "nightty_popover", None)
         if previous is not None:
             previous.popdown()
             previous.unparent()
-        anchor.nightty_popover = menu
-        menu.set_parent(anchor)
+        self.workspace_button.nightty_popover = menu
+        menu.set_parent(self.workspace_button)
         menu.popup()
 
     def add_favourite(self):
         self.state.toggle_favourite(self.active.path)
+        self.refresh_star_buttons()
 
     def toggle_quick_view(self):
         if self.mode != "files":
@@ -2173,7 +2481,7 @@ class Window(Gtk.ApplicationWindow):
         serial = self.quick_serial
         selected = self.panes[0].selected_paths()
         path = selected[0] if selected else None
-        if path is None or str(path) in self.panes[0].directory_paths:
+        if path is None:
             self.quick_title.set_text("Select a file in the left pane")
             self.quick_document.get_buffer().set_text("")
             self.quick_details.set_text("")
@@ -2287,6 +2595,8 @@ class Window(Gtk.ApplicationWindow):
                 self.refresh_file_footer(self.active)
                 self.focus_active_browser()
         self.refresh_mode_buttons()
+        for pane in self.panes:
+            self.refresh_pane_controls(pane)
         if previous_mode != mode and mode in {"files", "gallery"}:
             GLib.idle_add(self.focus_browser_after_switch, mode)
 
@@ -2527,6 +2837,9 @@ class Window(Gtk.ApplicationWindow):
         key = Gdk.keyval_name(keyval)
         if self.top_tab_shortcut(key, state):
             return True
+        if focus is not None and (isinstance(focus, Gtk.Popover)
+                                  or focus.get_ancestor(Gtk.Popover) is not None):
+            return False
         if (self.mode == "files" and key in {"Insert", "KP_Insert"}
                 and not state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.CONTROL_MASK
                                | Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.SUPER_MASK)):
@@ -2683,7 +2996,7 @@ class Window(Gtk.ApplicationWindow):
                 return
             entries = [("..", True, 0, path.parent, True)] if path.parent != path else []
             entries += [(name, directory, size, path / name, False)
-                        for name, directory, _symlink, size, _executable in rows]
+                        for name, directory, _symlink, size, _executable, _modified, _created in rows]
             restore_paths.intersection_update(entry[3] for entry in entries)
             pane.gallery_children_by_logical = [None] * len(entries)
             ordered = []
@@ -2909,15 +3222,36 @@ class Window(Gtk.ApplicationWindow):
     def read_preview(self, path, width, height):
         info = path.stat()
         content_type = Gio.content_type_guess(str(path), None)[0] or "application/octet-stream"
-        description = Gio.content_type_get_description(content_type) or content_type
+        directory = path.is_dir()
+        description = "Directory" if directory else Gio.content_type_get_description(content_type) or content_type
         details = ["Name", path.name, "", "Type", description, content_type,
-                   "", "Size", f"{self.size(info.st_size)} ({info.st_size:,} bytes)",
+                   "", "Size", "—" if directory else f"{self.size(info.st_size)} ({info.st_size:,} bytes)",
                    "", "Modified", datetime.fromtimestamp(info.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
                    "", "Permissions", stat.filemode(info.st_mode),
+                   "", "Owner", f"{info.st_uid}:{info.st_gid}",
                    "", "Location", str(path.parent)]
+        try:
+            file_info = Gio.File.new_for_path(str(path)).query_info(
+                Gio.FILE_ATTRIBUTE_TIME_CREATED, Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, None)
+            if file_info.has_attribute(Gio.FILE_ATTRIBUTE_TIME_CREATED):
+                created = file_info.get_attribute_uint64(Gio.FILE_ATTRIBUTE_TIME_CREATED)
+                details += ["", "Created", datetime.fromtimestamp(created).strftime("%Y-%m-%d %H:%M:%S")]
+        except GLib.Error:
+            pass
+        try:
+            filesystem = os.statvfs(path)
+            details += ["", "Available on filesystem",
+                        self.size(filesystem.f_bavail * filesystem.f_frsize)]
+        except OSError:
+            pass
         if path.is_symlink():
             details += ["", "Link target", os.readlink(path)]
         try:
+            if directory:
+                with os.scandir(path) as entries:
+                    count = sum(1 for _entry in entries)
+                details += ["", "Entries", str(count)]
+                return "text", "Directory\n\nPress Enter to browse it.", "\n".join(details)
             if content_type.startswith("image/"):
                 _format, image_width, image_height = GdkPixbuf.Pixbuf.get_file_info(str(path))
                 details += ["", "Dimensions", f"{image_width} × {image_height} px"]
@@ -2939,7 +3273,7 @@ class Window(Gtk.ApplicationWindow):
 
     def preview(self, path=None):
         path = path or self.selection
-        if path is None or str(path) in self.active.directory_paths:
+        if path is None:
             return
         path = Path(path)
         if self.mode != "inspect":
@@ -3058,6 +3392,7 @@ class Window(Gtk.ApplicationWindow):
             if self.mode != "files":
                 self.set_mode("files")
         serial, cancellation = pane.begin_results(query, scope, preserve_marks, focus=reveal)
+        requested_created = pane.sort_key == "created"
         batches = queue.SimpleQueue()
         search_finished = False
 
@@ -3083,8 +3418,7 @@ class Window(Gtk.ApplicationWindow):
                 return
             drain()
             search_finished = True
-            pane.results_matches.sort(key=lambda match: (match.path.name.casefold(),
-                                                         str(match.path.parent).casefold()))
+            pane.results_created_loaded = requested_created
             pane.show_result_rows(outcome=outcome)
 
         def failed(exc):
@@ -3097,7 +3431,8 @@ class Window(Gtk.ApplicationWindow):
                 pane.show_result_rows(error=str(exc))
 
         self.async_call(lambda: find_names(query, pane.path, scope, pane.hidden, batches.put,
-                                           cancellation.is_set), finish, failed,
+                                           cancellation.is_set,
+                                           include_created=requested_created), finish, failed,
                         executor=self.listing_pool)
 
     def create_directory(self):
@@ -4291,6 +4626,10 @@ class Window(Gtk.ApplicationWindow):
         alt = bool(event.state & Gdk.ModifierType.ALT_MASK)
         key = Gdk.keyval_name(event.keyval)
         terminal_focus = any(terminal.has_focus() for terminal, _pid in self.terminals)
+        focus = self.get_focus()
+        if (focus is not None and focus.get_ancestor(Gtk.Popover) is not None
+                and key in {"Escape", "Left", "Right", "Up", "Down", "Return", "KP_Enter"}):
+            return False
         if self.top_tab_shortcut(key, event.state):
             return True
         if terminal_focus and not (
@@ -4308,6 +4647,9 @@ class Window(Gtk.ApplicationWindow):
             self.set_mode({"1": "files", "2": "project", "3": "console", "4": "gallery"}[key])
         elif ctrl and not shift and not alt and self.mode_shortcut(key):
             pass
+        elif (ctrl and not shift and not alt and key in {"F1", "F2"}
+              and self.mode in {"files", "gallery"}):
+            self.show_pane_menu(self.panes[0 if key == "F1" else 1], "location")
         elif ctrl and key == "5":
             self.toggle_quick_view()
         elif alt and key in {"1", "2", "F1", "F2"}:

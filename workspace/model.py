@@ -114,10 +114,13 @@ def context_for(path):
             "agent": agent, "work": work, "warnings": warnings}
 
 
-def directory_entries(folder, hidden=False, on_batch=None, cancelled=None):
+def directory_entries(folder, hidden=False, on_batch=None, cancelled=None,
+                      include_created=False):
     rows = []
     batch = []
     last_batch = time.monotonic()
+    if include_created:
+        from gi.repository import Gio, GLib
     with os.scandir(folder) as entries:
         for entry in entries:
             if cancelled is not None and cancelled():
@@ -128,9 +131,20 @@ def directory_entries(folder, hidden=False, on_batch=None, cancelled=None):
                 info = entry.stat(follow_symlinks=False)
                 is_directory = entry.is_dir()
                 executable = stat.S_ISREG(info.st_mode) and bool(info.st_mode & 0o111)
-                row = (entry.name, is_directory, entry.is_symlink(), info.st_size, executable)
+                created = getattr(info, "st_birthtime", None)
+                if include_created and created is None:
+                    try:
+                        file_info = Gio.File.new_for_path(entry.path).query_info(
+                            Gio.FILE_ATTRIBUTE_TIME_CREATED,
+                            Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, None)
+                        if file_info.has_attribute(Gio.FILE_ATTRIBUTE_TIME_CREATED):
+                            created = file_info.get_attribute_uint64(Gio.FILE_ATTRIBUTE_TIME_CREATED)
+                    except (GLib.Error, OSError):
+                        pass
+                row = (entry.name, is_directory, entry.is_symlink(), info.st_size,
+                       executable, info.st_mtime, created)
             except OSError:
-                row = (entry.name, False, entry.is_symlink(), 0, False)
+                row = (entry.name, False, entry.is_symlink(), 0, False, None, None)
             rows.append(row)
             if on_batch is not None:
                 batch.append(row)
@@ -141,6 +155,25 @@ def directory_entries(folder, hidden=False, on_batch=None, cancelled=None):
     if on_batch is not None and batch:
         on_batch(batch)
     return sorted(rows, key=lambda row: (not row[1], row[0].casefold()))
+
+
+def sort_directory_rows(rows, criterion="name", reverse=False):
+    """Keep folders first and missing timestamps last in either direction."""
+    ordered = sorted(rows, key=lambda row: row[0].casefold())
+    if criterion == "extension":
+        ordered.sort(key=lambda row: Path(row[0]).suffix.casefold(), reverse=reverse)
+    elif criterion in {"size", "modified", "created"}:
+        index = {"size": 3, "modified": 5, "created": 6}[criterion]
+        ordered.sort(key=lambda row: row[index] if row[index] is not None else 0,
+                     reverse=reverse)
+        ordered.sort(key=lambda row: row[index] is None)
+    elif criterion == "name":
+        if reverse:
+            ordered.reverse()
+    else:
+        raise ValueError(f"Unknown sort criterion: {criterion}")
+    ordered.sort(key=lambda row: not row[1])
+    return ordered
 
 
 class Cancelled(Exception):

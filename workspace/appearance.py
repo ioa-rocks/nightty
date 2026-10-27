@@ -32,6 +32,12 @@ headerbar button.tab-close:hover { color:$header_text; }
 headerbar button.transfer-alert { background:#a83f32; color:#ffffff; font-weight:700; }
 button { border-radius:2px; padding:4px 8px; }
 button:checked { background:$accent; color:$accent_text; }
+button.pane-header-control { background:transparent; background-image:none; color:$muted; border:0; box-shadow:none; border-radius:4px; min-width:32px; min-height:32px; padding:3px; }
+button.pane-header-control:hover,
+button.pane-header-control:focus { background:$surface; color:$foreground; }
+button.pane-address-control { min-width:28px; min-height:28px; margin:2px; }
+entry.pane-address-entry { padding-left:36px; padding-right:36px; border-radius:4px; }
+.pane-menu-item { min-width:260px; padding:6px 12px; }
 window.mc-dialog { background:$surface; color:$foreground; border:2px solid $accent; border-radius:0; box-shadow:none; font-family:'$family'; }
 .mc-dialog-content { background:$surface; }
 .mc-dialog-title { background:$surface; color:$accent; border-bottom:1px solid $border; padding:12px 26px; font-size:${dialog_title_px}px; font-weight:700; }
