@@ -154,7 +154,7 @@ Project mode enhances the same files rather than replacing navigation with a
 separate data store. Full task/pocket permissions and inheritance remain future
 Second Brain work.
 
-## Copying
+## File operations
 
 In Files, Insert or Ctrl+T marks a file and advances the cursor; Shift+Up/Down
 marks the current file and moves in that direction. Right-click toggles a mark
@@ -175,6 +175,8 @@ cross-filesystem moves copy first, then remove the source. Cancellation is
 cooperative. Background failures ring the desktop bell and leave an alert on the
 transfer button until the transfer panel is opened. Transfer progress is desktop
 operation state, separate from project tasks.
+
+F7 creates a new directory in the active pane and selects it after refresh.
 
 ## Controls
 
@@ -219,7 +221,8 @@ operation state, separate from project tasks.
 - Locations menu beside either path: choose a favourite or recent folder, or
   star/unstar that pane's current folder
 - F3: inspect selected file; F4: open with the default application;
-  Shift+F5: copy with a same-folder filename; Shift+F6: rename in place
+  Shift+F5: copy with a same-folder filename; Shift+F6: rename in place;
+  F7: create a directory in the active pane
 - ⇄ in the top bar: transfer progress and cancellation
 - Escape: leave Inspect or inline search; F12: hide; Ctrl+Q: explicit quit
 

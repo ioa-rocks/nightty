@@ -2848,6 +2848,104 @@ class Window(Gtk.ApplicationWindow):
         except GLib.Error as exc:
             self.status.set_text(f"Cannot open {path.name}: {exc}")
 
+    def create_directory(self):
+        pane = self.active
+        folder = pane.path
+        dialog = Gtk.Window(transient_for=self, modal=True)
+        dialog.set_title("Create directory")
+        dialog.set_decorated(False)
+        dialog.set_resizable(False)
+        dialog.add_css_class("mc-dialog")
+        content = Box(orientation=Gtk.Orientation.VERTICAL)
+        content.add_css_class("mc-dialog-content")
+        content.set_size_request(580, -1)
+        dialog.set_child(content)
+        content.append(label("CREATE DIRECTORY", "mc-dialog-title"))
+        fields = Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        fields.add_css_class("mc-transfer-fields")
+        content.append(fields)
+        fields.append(label("In", "mc-transfer-caption"))
+        location = label(str(folder), "mc-transfer-value")
+        location.set_tooltip_text(str(folder))
+        fields.append(location)
+        fields.append(label("Directory name", "mc-transfer-caption"))
+        name_entry = Gtk.Entry()
+        name_entry.add_css_class("mc-transfer-entry")
+        fields.append(name_entry)
+        error = label("", "mc-transfer-error")
+        error.set_wrap(True)
+        error.set_ellipsize(Pango.EllipsizeMode.NONE)
+        error.set_visible(False)
+        content.append(error)
+        actions = Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        actions.add_css_class("mc-dialog-actions")
+        content.append(actions)
+        create = Gtk.Button(label="_Create", use_underline=True)
+        cancel = Gtk.Button(label="_Cancel", use_underline=True)
+        for choice in (create, cancel):
+            choice.add_css_class("mc-dialog-button")
+            choice.set_hexpand(True)
+            actions.append(choice)
+        create.add_css_class("mc-dialog-default")
+        dialog.set_default_widget(create)
+        creating = False
+
+        def begin():
+            nonlocal creating
+            if creating:
+                return
+            name = name_entry.get_text()
+            if not name.strip() or name in {".", ".."} or Path(name).name != name:
+                error.set_text("Enter a directory name without path separators.")
+                error.set_visible(True)
+                return
+            creating = True
+            name_entry.set_sensitive(False)
+            create.set_sensitive(False)
+            create.set_label("Creating…")
+            cancel.set_sensitive(False)
+            error.set_visible(False)
+
+            def created(_result):
+                if not dialog.get_visible():
+                    return
+                dialog.destroy()
+                if pane.path == folder:
+                    pane.navigate(folder, selected_name=name)
+                    (pane.gallery_flow if self.mode == "gallery" else pane.view).grab_focus()
+
+            def failed(exc):
+                nonlocal creating
+                if not dialog.get_visible():
+                    return
+                creating = False
+                name_entry.set_sensitive(True)
+                create.set_sensitive(True)
+                create.set_label("_Create")
+                cancel.set_sensitive(True)
+                error.set_text(str(exc))
+                error.set_visible(True)
+                name_entry.grab_focus()
+
+            self.async_call(lambda: (folder / name).mkdir(), created, failed)
+
+        create.connect("clicked", lambda *_: begin())
+        cancel.connect("clicked", lambda *_: dialog.destroy())
+        name_entry.connect("activate", lambda *_: begin())
+        dialog.connect("close-request", lambda *_: creating)
+
+        def dialog_key(_widget, event):
+            if event.keyval == Gdk.KEY_Escape:
+                if not creating:
+                    dialog.destroy()
+                return True
+            return False
+
+        connect_key(dialog, dialog_key, capture=True)
+        dialog.present()
+        name_entry.grab_focus()
+        return dialog
+
     def copy(self, same_folder=False):
         return self.transfer_dialog("copy", same_folder)
 
@@ -3844,6 +3942,8 @@ class Window(Gtk.ApplicationWindow):
             self.copy(same_folder=shift)
         elif key == "F6" and self.mode in {"files", "gallery"}:
             self.move(same_folder=shift)
+        elif key == "F7" and self.mode in {"files", "gallery"}:
+            self.create_directory()
         else:
             return False
         return True
