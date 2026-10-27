@@ -31,13 +31,16 @@ headerbar button.tab-close { color:$muted; padding:5px 5px; }
 headerbar button.tab-close:hover { color:$header_text; }
 button { border-radius:2px; padding:4px 8px; }
 button:checked { background:$accent; color:$accent_text; }
-dialog.mc-dialog { background:$surface; color:$foreground; border:2px solid $accent; border-radius:0; box-shadow:none; font-family:'$family'; font-size:${ui_px}px; }
-.mc-dialog-title { background:$surface; color:$accent; border-bottom:1px solid $border; padding:5px 14px; font-size:${small_px}px; font-weight:700; }
-.mc-dialog-message { color:$foreground; padding:18px 20px 8px; }
-.mc-dialog-detail { color:$muted; font-size:${small_px}px; padding:0 20px 10px; }
-dialog.mc-dialog button.mc-dialog-button { background:$background; background-image:none; color:$foreground; border:1px solid $border; border-radius:0; box-shadow:none; min-width:84px; padding:4px 12px; font-family:'$family'; font-size:${ui_px}px; }
-dialog.mc-dialog button.mc-dialog-default, dialog.mc-dialog button.mc-dialog-button:focus { background:$accent; color:$accent_text; border-color:$accent; }
-dialog.mc-dialog button.mc-dialog-button:hover { border-color:$foreground; }
+window.mc-dialog { background:$surface; color:$foreground; border:2px solid $accent; border-radius:0; box-shadow:none; font-family:'$family'; }
+.mc-dialog-content { background:$surface; }
+.mc-dialog-title { background:$surface; color:$accent; border-bottom:1px solid $border; padding:12px 26px; font-size:${dialog_title_px}px; font-weight:700; }
+.mc-dialog-message { color:$foreground; padding:24px 26px 12px; font-size:${dialog_message_px}px; }
+.mc-dialog-detail { color:$muted; padding:0 26px 20px; font-size:${dialog_detail_px}px; }
+.mc-dialog-actions { padding:14px 26px 24px; border-top:1px solid $border; }
+window.mc-dialog button.mc-dialog-button { background:$background; background-image:none; color:$foreground; border:2px solid $border; border-radius:2px; box-shadow:none; min-width:150px; min-height:52px; padding:8px 16px; font-family:'$family'; font-size:${dialog_button_px}px; font-weight:700; }
+window.mc-dialog button.mc-dialog-default { background:$accent; color:$accent_text; border-color:$accent; }
+window.mc-dialog button.mc-dialog-button:focus { border-color:$accent; }
+window.mc-dialog button.mc-dialog-button:hover { border-color:$foreground; }
 entry { background:$surface; color:$foreground; border:1px solid $border; border-radius:0; font-family:'$family'; font-size:${files_px}px; }
 treeview { background:$background; color:$foreground; font-family:'$family'; font-size:${files_px}px; outline-width:0; }
 treeview:selected { background:$accent; color:$accent_text; outline-width:0; }
@@ -103,4 +106,9 @@ def load_appearance(path=None):
 
 
 def stylesheet(appearance):
-    return CSS.substitute({"marked": "#b58900"} | appearance["palette"] | appearance["fonts"]).encode()
+    fonts = appearance["fonts"]
+    dialog_sizes = {"dialog_title_px": max(fonts["heading_px"], fonts["ui_px"] + 6),
+                    "dialog_message_px": fonts["ui_px"] + 4,
+                    "dialog_detail_px": fonts["ui_px"] + 2,
+                    "dialog_button_px": fonts["ui_px"] + 4}
+    return CSS.substitute({"marked": "#b58900"} | appearance["palette"] | fonts | dialog_sizes).encode()

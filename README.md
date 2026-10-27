@@ -85,9 +85,9 @@ embedded by this slice.
 PDF previews use `pdftocairo` when it is installed; other file views continue
 to work without it.
 
-The Files pane still uses `Gtk.IconView`, agent selectors use `Gtk.ComboBoxText`,
-and confirmations use `Gtk.Dialog`. GTK 4 supports these widgets but deprecated
-them in 4.10; replacing them is follow-up work for GTK 5 readiness.
+The Files pane still uses `Gtk.IconView`, and agent selectors use
+`Gtk.ComboBoxText`. GTK 4 supports these widgets but deprecated them in 4.10;
+replacing them is follow-up work for GTK 5 readiness.
 
 ```sh
 ./run.sh --left /path/to/work --right /path/to/another/folder

@@ -170,52 +170,79 @@ def button(text, callback):
 
 
 def yes_no_dialog(parent, text, secondary=None):
-    dialog = Gtk.Dialog(transient_for=parent, modal=True, use_header_bar=False)
+    dialog = Gtk.Window(transient_for=parent, modal=True)
     dialog.set_decorated(False)
     dialog.set_resizable(False)
     dialog.add_css_class("mc-dialog")
-    content = dialog.get_content_area()
-    content.set_spacing(0)
+    content = Box(orientation=Gtk.Orientation.VERTICAL)
+    content.add_css_class("mc-dialog-content")
+    content.set_size_request(580, -1)
+    dialog.set_child(content)
 
-    title = Gtk.Label(label=" Confirm ")
+    title = Gtk.Label(label="CONFIRM", xalign=0)
     title.add_css_class("mc-dialog-title")
     content.append(title)
 
     message = Gtk.Label(label=text, xalign=0)
     message.set_wrap(True)
     message.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-    message.set_max_width_chars(54)
+    message.set_max_width_chars(44)
     message.add_css_class("mc-dialog-message")
     content.append(message)
     if secondary:
         detail = Gtk.Label(label=secondary, xalign=0)
         detail.set_wrap(True)
         detail.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        detail.set_max_width_chars(54)
+        detail.set_max_width_chars(44)
         detail.add_css_class("mc-dialog-detail")
         content.append(detail)
 
-    yes = dialog.add_button("_Yes", Gtk.ResponseType.YES)
-    no = dialog.add_button("_No", Gtk.ResponseType.NO)
+    actions = Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+    actions.add_css_class("mc-dialog-actions")
+    no = Gtk.Button(label="_No", use_underline=True)
+    yes = Gtk.Button(label="_Yes", use_underline=True)
     for choice in (yes, no):
         choice.add_css_class("mc-dialog-button")
+        choice.set_hexpand(True)
+    actions.append(no)
+    actions.append(yes)
+    content.append(actions)
     yes.add_css_class("mc-dialog-default")
-    dialog.set_default_response(Gtk.ResponseType.YES)
-    return dialog
+    dialog.set_default_widget(yes)
+    return dialog, yes, no
 
 
 def confirm(parent, text, secondary, on_yes, on_no=None):
-    dialog = yes_no_dialog(parent, text, secondary)
+    dialog, yes, no = yes_no_dialog(parent, text, secondary)
+    answered = False
 
-    def answered(_dialog, response):
+    def answer(approved):
+        nonlocal answered
+        if answered:
+            return
+        answered = True
         dialog.destroy()
-        if response == Gtk.ResponseType.YES:
+        if approved:
             on_yes()
         elif on_no is not None:
             on_no()
 
-    dialog.connect("response", answered)
+    yes.connect("clicked", lambda *_: answer(True))
+    no.connect("clicked", lambda *_: answer(False))
+    dialog.connect("close-request", lambda *_: (answer(False), True)[1])
+
+    def dialog_key(_widget, event):
+        if event.keyval == Gdk.KEY_Escape:
+            answer(False)
+            return True
+        if event.keyval in {Gdk.KEY_Return, Gdk.KEY_KP_Enter}:
+            answer(dialog.get_focus() is not no)
+            return True
+        return False
+
+    connect_key(dialog, dialog_key, capture=True)
     dialog.present()
+    yes.grab_focus()
     return dialog
 
 
