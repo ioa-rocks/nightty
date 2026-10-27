@@ -136,6 +136,7 @@ def smoke(args):
         (child / "0-日本語.txt").write_text("Japanese filename\n")
         for index in range(80):
             (child / f"note-{index:02}.txt").write_text(f"Note {index}\n")
+        (child / "note-15-日本語.txt").write_text("Japanese name in the right column\n")
         image = cairo.ImageSurface(cairo.FORMAT_ARGB32, 900, 480)
         drawing = cairo.Context(image)
         drawing.set_source_rgb(.12, .20, .29)
@@ -268,7 +269,10 @@ def smoke(args):
                     return True
                 if step["number"] == 0 and not step.get("footer_checked"):
                     if not step.get("footer_check_started"):
-                        window.panes[0].status.set_text("ドラレコ　人身事故　子ども飛び出し.webm")
+                        step["footer_before"] = (window.panes[0].status_box.get_height(),
+                                                 window.panes[0].scroll.get_height(),
+                                                 window.panes[0].capacity)
+                        window.panes[0].status.set_text("搭乗用バーコード登録 - JAL国内線予約 (1)")
                         step["footer_check_started"] = True
                         return True
                     left, right = window.panes
@@ -276,10 +280,11 @@ def smoke(args):
                     right_y = right.list_end.translate_coordinates(window.file_panes, 0, 0)[1]
                     assert left_y == right_y, (left_y, right_y,
                         left.status_box.get_allocated_height(), right.status_box.get_allocated_height())
+                    assert (left.status_box.get_height(), left.scroll.get_height(), left.capacity) == step["footer_before"]
                     screenshot("footer-japanese")
                     window.refresh_file_footer(left)
                     step["footer_checked"] = True
-                    checks.append("Japanese footer text keeps both pane bottom lines aligned")
+                    checks.append("Japanese footer text keeps height and both pane bottom lines stable")
                 number = step["number"]
                 if number == 0:
                     assert window.get_focus() is window.panes[0].view, (
@@ -381,7 +386,22 @@ def smoke(args):
                     viewport = pane.scroll.get_vadjustment().get_page_size()
                     assert row_rects[-2].y + pane.item_pitch() <= viewport
                     assert row_rects[-1].y + pane.item_pitch() > viewport
-                    checks.append("Japanese filename keeps every file row at the precomputed height")
+                    japanese_right = next(i for i, entry in enumerate(pane.entries)
+                                          if entry[1] == "note-15-日本語.txt")
+                    assert pane.capacity <= japanese_right < 2 * pane.capacity
+                    left_partner = pane.store_position(japanese_right - pane.capacity, 0)
+                    left_path = Gtk.TreePath.new_from_indices([left_partner])
+                    pane.view.unselect_all()
+                    pane.view.set_cursor(left_path, None, False)
+                    pane.view.select_path(left_path)
+                    footer_height = pane.status_box.get_height()
+                    assert pane.move_by_key(pane.view, argparse.Namespace(keyval=Gdk.KEY_Right, state=0))
+                    assert pane.cursor_logical() == japanese_right
+                    assert len(pane.view.get_selected_items()) == 1
+                    assert pane.selected_paths() == [child / "note-15-日本語.txt"]
+                    assert pane.status_box.get_height() == footer_height
+                    checks.append("Japanese filenames keep row height and one right-column cursor")
+                    pane.view.unselect_all()
                     step["capacity"] = pane.capacity
                     left_bottom = pane.store_position(pane.capacity - 1, 0)
                     pane.view.set_cursor(Gtk.TreePath.new_from_indices([left_bottom]), None, False)
@@ -447,8 +467,8 @@ def smoke(args):
                     pane.view.set_cursor(visible_path, None, False)
                     pane.view.select_path(visible_path)
                     pane.selected()
-                    assert all(pane.view.path_is_selected(Gtk.TreePath.new_from_indices([i]))
-                               for i in positions)
+                    assert [i for i in positions if pane.view.path_is_selected(
+                        Gtk.TreePath.new_from_indices([i]))] == [positions[0]]
                     adjustment.set_value(6 * pane.item_pitch())
                     pane.snap_scroll()
                     pane.view.unselect_path(Gtk.TreePath.new_from_indices([positions[1]]))

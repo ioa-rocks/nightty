@@ -360,7 +360,7 @@ class Pane(Box):
         self.view.pack_start(renderer, True)
         self.view.add_attribute(renderer, "text", 1)
         self.view.set_cell_data_func(renderer, self.name_color)
-        connect_key(self.view, self.move_by_key)
+        connect_key(self.view, self.move_by_key, capture=True)
         connect_click(self.view, self.focus_nearest_on_blank)
         connect_focus(self.view, lambda *_: self.window.activate_pane(self))
         self.view.connect("item-activated", self.open)
@@ -385,6 +385,8 @@ class Pane(Box):
         self.status_box.add_css_class("footer-box")
         self.status = label("", "footer-details")
         self.status.set_selectable(False)
+        # Keep the footer steady when a fallback font has taller CJK glyphs.
+        self.status.set_size_request(-1, math.ceil(self.window.appearance["fonts"]["small_px"] * 1.5))
         self.status_box.pack_start(self.status, False, False, 0)
         folder_row = Box(spacing=12)
         self.folder_path = label("", "footer-folder")
@@ -683,8 +685,9 @@ class Pane(Box):
         return min(positions, key=lambda position:
                    max(top - position // 2, 0, position // 2 - top - self.capacity + 1))
 
-    def select_logical(self, logical):
-        for position in self.logical_to_stores.get(logical, ()):
+    def select_logical(self, logical, top=None):
+        position = self.store_position(logical, top)
+        if position is not None:
             self.view.select_path(Gtk.TreePath.new_from_indices([position]))
 
     def nearest_logical(self, position):
@@ -826,9 +829,9 @@ class Pane(Box):
         self.view.set_cursor(path, None, False)
         if shift:
             for logical in range(min(anchor, target), max(anchor, target) + 1):
-                self.select_logical(logical)
+                self.select_logical(logical, next_top)
         elif not control:
-            self.select_logical(target)
+            self.select_logical(target, next_top)
         self.view.handler_unblock(self.cursor_handler)
         self.view.scroll_to_path(path, False, 0.0, 0.0)
         self.selected()
@@ -900,7 +903,7 @@ class Pane(Box):
         self.view.handler_block(self.cursor_handler)
         if not multiple_selected:
             self.view.unselect_all()
-            self.select_logical(target)
+            self.select_logical(target, top)
         self.view.set_cursor(Gtk.TreePath.new_from_indices([position]), None, False)
         self.view.handler_unblock(self.cursor_handler)
         self.selected()
@@ -1007,7 +1010,9 @@ class Pane(Box):
                     if not staging and (entry[3] in self.model_selected_paths or
                             self.model_pending_range is not None and
                             self.model_pending_range[0] <= logical <= self.model_pending_range[1]):
-                        self.view.select_path(Gtk.TreePath.new_from_indices([position]))
+                        if not any(self.view.path_is_selected(Gtk.TreePath.new_from_indices([existing]))
+                                   for existing in path_to_stores[entry[3]][:-1]):
+                            self.view.select_path(Gtk.TreePath.new_from_indices([position]))
                 else:
                     store.append(empty)
         if end == total_rows and len(self.entries) > 2 * self.capacity:
@@ -1056,7 +1061,10 @@ class Pane(Box):
             self.view.set_cursor(path, None, False)
             self.selection_anchor = target
         for entry_path in selected:
-            for position in self.path_to_stores.get(entry_path, ()):
+            positions = self.path_to_stores.get(entry_path, ())
+            logical = self.store_to_logical.get(positions[0]) if positions else None
+            position = self.store_position(logical) if logical is not None else None
+            if position is not None:
                 self.view.select_path(Gtk.TreePath.new_from_indices([position]))
         if target is not None:
             self.view.queue_resize()
@@ -1156,8 +1164,9 @@ class Pane(Box):
             _first, last = visible_range
             found, rect = self.view.get_cell_rect(last, None)
             if found and 0 <= rect.y < height:
+                row_bottom = rect.y + self.item_pitch()
                 visible_bottom = max(0, min(height,
-                    rect.y if rect.y + rect.height > height else rect.y + rect.height))
+                    rect.y if row_bottom > height else row_bottom))
         background = Gdk.RGBA()
         background.parse(self.window.palette["background"])
         context.set_source_rgba(background.red, background.green, background.blue, background.alpha)
@@ -1202,11 +1211,16 @@ class Pane(Box):
             visible_selected = {self.store_to_logical[row] for row in selected_rows
                                 if row in self.store_to_logical and top <= row // 2 < top + self.capacity}
             keep = (selected_logicals - visible) | visible_selected
+            cursor_path = self.view.get_cursor()[1]
+            cursor_row = cursor_path.get_indices()[0] if cursor_path is not None else None
             self.view.handler_block(self.cursor_handler)
             for logical in visible | selected_logicals:
-                for position in self.logical_to_stores.get(logical, ()):
+                positions = self.logical_to_stores.get(logical, ())
+                preferred = (cursor_row if cursor_row in positions else
+                             self.store_position(logical, top)) if logical in keep else None
+                for position in positions:
                     path = Gtk.TreePath.new_from_indices([position])
-                    if logical in keep:
+                    if position == preferred:
                         self.view.select_path(path)
                     else:
                         self.view.unselect_path(path)
