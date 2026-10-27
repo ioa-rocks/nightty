@@ -45,7 +45,7 @@ backend. The existing browser AgentConsole remains independent.
   thumbnail, text excerpt or file type
   icon, plus filename, type, size and image dimensions or modification time. The
   parent directory appears as a large `..` instead of a folder card. Select
-  several items and use F5 to copy them to the other pane. F3 expands one file
+  several items and use F5 to copy or F6 to move them to the other pane. F3 expands one file
   with type, size, modified time, permissions, location and image dimensions; Escape
   returns from that single-file preview to the gallery or file list. Left and
   Right follow the same sliding columns and screenfuls as the file list. Gallery
@@ -161,15 +161,20 @@ marks the current file and moves in that direction. Right-click toggles a mark
 without moving. A line closes each file list. Each pane's two-row footer shows one
 selected file's details or the selected count and size, then that pane's folder,
 entry count and available filesystem space. The command line below uses a
-`user@host:path$` prompt. F5
-copies marked entries, or the current entry when nothing is marked. Gallery
-uses its own selection. Copies run in a background worker. They
-preserve symbolic links and refuse existing destinations. Each regular file is
+`user@host:path$` prompt. F5 copies marked entries, or the current entry when
+nothing is marked; F6 moves them. Gallery uses its own selection. Both dialogs
+show the source and an editable destination, with Yes, Background and Cancel.
+Yes shows progress with Switch to Background and Cancel. Shift+F5 suggests the
+current file's own path so its name can be edited for a copy in the same folder;
+Shift+F6 does the same for rename. Transfers run in a worker. They preserve
+symbolic links and refuse existing destinations. Each regular file is
 written to a temporary sibling and published without overwriting another name.
 Directory transfers can leave already completed entries on cancellation/failure;
-the transfer panel reports that state. Cancellation is cooperative. Transfer
-progress is desktop operation state, separate from project tasks. No delete or
-move operation is provided in this first prototype; MC is available in a terminal.
+the transfer panel reports that state. Same-filesystem moves use an atomic rename;
+cross-filesystem moves copy first, then remove the source. Cancellation is
+cooperative. Background failures ring the desktop bell and leave an alert on the
+transfer button until the transfer panel is opened. Transfer progress is desktop
+operation state, separate from project tasks.
 
 ## Controls
 
@@ -208,20 +213,20 @@ move operation is provided in this first prototype; MC is available in a termina
   default application; F3: embedded preview; Home / End: first / last item
 - Insert / Ctrl+T: mark or unmark the cursor file and move down;
   Shift+Up / Shift+Down: mark or unmark and move that way; right-click: toggle
-  a mark without moving. F5 copies marked files, or the cursor file.
+  a mark without moving. F5 copies and F6 moves marked files, or the cursor file.
 - Alt+Up: parent; Ctrl+L: edit the active path; Ctrl+H: hidden files
 - Ctrl+D: star or unstar the active directory
 - Locations menu beside either path: choose a favourite or recent folder, or
   star/unstar that pane's current folder
-- F3: inspect selected file; F4: open with the default application; F5:
-  background copy in Files or Gallery (the confirmation defaults to Yes)
+- F3: inspect selected file; F4: open with the default application;
+  Shift+F5: copy with a same-folder filename; Shift+F6: rename in place
 - ⇄ in the top bar: transfer progress and cancellation
 - Escape: leave Inspect or inline search; F12: hide; Ctrl+Q: explicit quit
 
 ## Verification
 
 `python3 -m unittest discover -s tests -v` verifies metadata inheritance,
-navigation state, copy cancellation/no-clobber, symlink preservation and the
+navigation state, copy and move cancellation/no-clobber, symlink preservation and the
 loopback-only agent client. `./run.sh --smoke --state /tmp/workspace-smoke-state`
 uses disposable files and fake agents, exercises native navigation, preview,
 copying and terminal output, and saves screenshots under `/tmp/`.

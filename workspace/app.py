@@ -1305,6 +1305,7 @@ class Window(Gtk.ApplicationWindow):
         self.thumbnails_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="surface-thumbnails")
         self.transfers_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="surface-copy")
         self.jobs, self.terminals = [], []
+        self.transfer_alert = False
         self.context, self.context_serial, self.preview_serial = None, 0, 0
         self.project_context_path = None
         self.selection, self.mode = None, "files"
@@ -2847,24 +2848,218 @@ class Window(Gtk.ApplicationWindow):
         except GLib.Error as exc:
             self.status.set_text(f"Cannot open {path.name}: {exc}")
 
-    def copy(self):
-        sources = self.gallery_selected_paths() if self.mode == "gallery" else self.active.operation_paths()
+    def copy(self, same_folder=False):
+        return self.transfer_dialog("copy", same_folder)
+
+    def move(self, same_folder=False):
+        return self.transfer_dialog("move", same_folder)
+
+    def transfer_dialog(self, operation, same_folder=False):
+        sources = self.gallery_selected_paths() if self.mode == "gallery" else (
+            [self.active.current_path()] if same_folder else self.active.operation_paths())
+        sources = [Path(source) for source in sources if source is not None]
         if not sources:
-            self.status.set_text("Select a file or mark files to copy (Insert or Ctrl+T).")
+            self.status.set_text(f"Select a file or mark files to {operation} (Insert or Ctrl+T).")
             return
-        destination = self.panes[1 - self.active.index].path
-        source_label = ("marked" if self.mode == "files" and self.active.marked_paths
-                        else "current" if self.mode == "files" and len(sources) == 1
-                        else "selected")
-        confirm(self, f"Copy {len(sources)} {source_label} item(s) in the background?",
-                str(destination) + "\nExisting destinations will be left unchanged.",
-                lambda: self.start_copy(sources, destination))
+        suggested = sources[0] if same_folder else self.panes[1 - self.active.index].path
+        dialog = Gtk.Window(transient_for=self, modal=True)
+        dialog.set_title("Copy" if operation == "copy" else "Move / Rename")
+        dialog.set_decorated(False)
+        dialog.set_resizable(False)
+        dialog.add_css_class("mc-dialog")
+        content = Box(orientation=Gtk.Orientation.VERTICAL)
+        content.add_css_class("mc-dialog-content")
+        content.set_size_request(680, -1)
+        dialog.set_child(content)
+        title = label("COPY FILES" if operation == "copy" else "MOVE / RENAME", "mc-dialog-title")
+        content.append(title)
+        fields = Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        fields.add_css_class("mc-transfer-fields")
+        content.append(fields)
+        source_title = label("From", "mc-transfer-caption")
+        fields.append(source_title)
+        source_text = (str(sources[0]) if len(sources) == 1 else
+                       f"{sources[0]} and {len(sources) - 1} more")
+        source_value = label(source_text, "mc-transfer-value")
+        source_value.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        source_value.set_tooltip_text("\n".join(map(str, sources)))
+        fields.append(source_value)
+        fields.append(label("To", "mc-transfer-caption"))
+        destination_entry = Gtk.Entry()
+        destination_entry.add_css_class("mc-transfer-entry")
+        destination_entry.set_text(str(suggested))
+        destination_entry.set_hexpand(True)
+        fields.append(destination_entry)
+        hint = label("Existing destinations are left unchanged.", "mc-dialog-detail")
+        content.append(hint)
+        error = label("", "mc-transfer-error")
+        error.set_wrap(True)
+        error.set_ellipsize(Pango.EllipsizeMode.NONE)
+        error.set_visible(False)
+        content.append(error)
+        actions = Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        actions.add_css_class("mc-dialog-actions")
+        content.append(actions)
+        yes = Gtk.Button(label="_Yes", use_underline=True)
+        background = Gtk.Button(label="_Background", use_underline=True)
+        cancel = Gtk.Button(label="_Cancel", use_underline=True)
+        for choice in (yes, background, cancel):
+            choice.add_css_class("mc-dialog-button")
+            choice.set_hexpand(True)
+            actions.append(choice)
+        yes.add_css_class("mc-dialog-default")
+        dialog.set_default_widget(yes)
+        checking = False
+
+        def begin(in_background):
+            nonlocal checking
+            if checking:
+                return
+            raw = destination_entry.get_text().strip()
+            if not raw:
+                error.set_text("Enter a destination.")
+                error.set_visible(True)
+                return
+            checking = True
+            destination_entry.set_sensitive(False)
+            yes.set_sensitive(False)
+            background.set_sensitive(False)
+            error.set_visible(False)
+
+            def resolve_destination():
+                target = Path(raw).expanduser()
+                if not target.is_absolute():
+                    target = sources[0].parent / target
+                if target.is_dir():
+                    destination, target_name = target, None
+                elif len(sources) == 1 and not raw.endswith("/"):
+                    destination, target_name = target.parent, target.name
+                    if not destination.is_dir():
+                        raise ValueError(f"Destination folder does not exist: {destination}")
+                else:
+                    raise ValueError("Select an existing destination folder for multiple files.")
+                if target_name and (destination / target_name).exists():
+                    raise FileExistsError(f"Already exists: {destination / target_name}")
+                if target_name and (destination / target_name).is_symlink():
+                    raise FileExistsError(f"Already exists: {destination / target_name}")
+                return destination, target_name
+
+            def failed(exc):
+                nonlocal checking
+                if not dialog.get_visible():
+                    return
+                checking = False
+                destination_entry.set_sensitive(True)
+                yes.set_sensitive(True)
+                background.set_sensitive(True)
+                error.set_text(str(exc))
+                error.set_visible(True)
+
+            def ready(resolved):
+                if not dialog.get_visible():
+                    return
+                destination, target_name = resolved
+                dialog.destroy()
+                job = self.start_transfer(sources, destination, target_name, operation,
+                                          background=in_background)
+                if not in_background:
+                    self.show_transfer_progress(job)
+
+            self.async_call(resolve_destination, ready, failed)
+
+        yes.connect("clicked", lambda *_: begin(False))
+        background.connect("clicked", lambda *_: begin(True))
+        cancel.connect("clicked", lambda *_: dialog.destroy())
+        destination_entry.connect("activate", lambda *_: begin(False))
+        connect_key(dialog, lambda _widget, event: (dialog.destroy(), True)[1]
+                    if event.keyval == Gdk.KEY_Escape else False, capture=True)
+        dialog.present()
+        destination_entry.grab_focus()
+        if same_folder:
+            destination_entry.select_region(len(str(sources[0].parent)) + 1, -1)
+        return dialog
+
+    def show_transfer_progress(self, job):
+        dialog = Gtk.Window(transient_for=self, modal=True)
+        dialog.set_decorated(False)
+        dialog.set_resizable(False)
+        dialog.add_css_class("mc-dialog")
+        content = Box(orientation=Gtk.Orientation.VERTICAL)
+        content.add_css_class("mc-dialog-content")
+        content.set_size_request(580, -1)
+        dialog.set_child(content)
+        content.append(label("COPYING" if job.operation == "copy" else "MOVING", "mc-dialog-title"))
+        message = label("Starting…", "mc-dialog-message")
+        content.append(message)
+        progress = Gtk.ProgressBar()
+        progress.add_css_class("mc-transfer-progress")
+        content.append(progress)
+        detail = label(str(job.destination / (job.target_name or job.sources[0].name)), "mc-dialog-detail")
+        detail.set_wrap(True)
+        detail.set_ellipsize(Pango.EllipsizeMode.NONE)
+        content.append(detail)
+        actions = Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        actions.add_css_class("mc-dialog-actions")
+        content.append(actions)
+        switch = Gtk.Button(label="Switch to _Background", use_underline=True)
+        cancel = Gtk.Button(label="_Cancel", use_underline=True)
+        for choice in (switch, cancel):
+            choice.add_css_class("mc-dialog-button")
+            choice.set_hexpand(True)
+            actions.append(choice)
+        switch.add_css_class("mc-dialog-default")
+        dialog.set_default_widget(switch)
+
+        def close():
+            if job.status in {"queued", "copying", "moving"}:
+                job.background = True
+            dialog.destroy()
+
+        def cancel_progress():
+            job.cancel.set()
+            cancel.set_sensitive(False)
+            message.set_text("Cancelling…")
+
+        def closing(_dialog):
+            if job.status in {"queued", "copying", "moving"}:
+                job.background = True
+            return False
+
+        switch.connect("clicked", lambda *_: close())
+        cancel.connect("clicked", lambda *_: cancel_progress())
+        dialog.connect("close-request", closing)
+        connect_key(dialog, lambda _widget, event: (close(), True)[1]
+                    if event.keyval == Gdk.KEY_Escape else False, capture=True)
+
+        def refresh():
+            if not dialog.get_visible():
+                return False
+            if job.status in {"queued", "copying", "moving"}:
+                message.set_text(f"{job.files} files · {self.size(job.bytes)}")
+                progress.pulse()
+                return True
+            message.set_text(f"{job.operation.title()} {job.status}: {job.files} files · {self.size(job.bytes)}")
+            if job.error:
+                detail.set_text(job.error)
+            progress.set_fraction(1 if job.status == "completed" else 0)
+            switch.set_label("_Close")
+            cancel.set_visible(False)
+            return False
+
+        dialog.present()
+        refresh()
+        GLib.timeout_add(120, refresh)
+        return dialog
 
     def start_copy(self, sources, destination):
-        job = Transfer(sources, destination)
+        return self.start_transfer(sources, destination)
+
+    def start_transfer(self, sources, destination, target_name=None, operation="copy", background=True):
+        job = Transfer(sources, destination, target_name=target_name, operation=operation)
+        job.background = background
         self.jobs.append(job)
         self.transfers_pool.submit(job.run)
-        self.status.set_text("Copy queued; you can keep navigating.")
+        self.status.set_text(f"{operation.title()} queued; you can keep navigating.")
         if self.mode == "files":
             def restore_footer():
                 if self.mode == "files":
@@ -2875,16 +3070,31 @@ class Window(Gtk.ApplicationWindow):
         return job
 
     def update_transfers(self):
-        running = [job for job in self.jobs if job.status in {"queued", "copying"}]
+        running = [job for job in self.jobs if job.status in {"queued", "copying", "moving"}]
         self.transfers_button.set_label(f"⇄ {len(running)}" if running else "⇄")
         for job in self.jobs:
             if job.status in {"completed", "failed", "cancelled"} and not getattr(job, "announced", False):
                 job.announced = True
+                if job.status == "failed" and getattr(job, "background", True):
+                    self.transfer_alert = True
+                    display = Gdk.Display.get_default()
+                    if display is not None:
+                        display.beep()
+                        GLib.timeout_add(180, lambda: (display.beep(), False)[1])
                 for pane in self.panes:
-                    if os.path.abspath(os.fspath(pane.path)) == os.path.abspath(os.fspath(job.destination)):
+                    refresh_paths = [job.destination]
+                    if job.operation == "move":
+                        refresh_paths.extend(Path(source).parent for source in job.sources)
+                    if any(os.path.abspath(os.fspath(pane.path)) == os.path.abspath(os.fspath(path))
+                           for path in refresh_paths):
                         pane.navigate(pane.path)
                 if self.mode != "files":
-                    self.status.set_text(f"Copy {job.status}: {job.files} files, {self.size(job.bytes)}" + (f" · {job.error}" if job.error else ""))
+                    self.status.set_text(f"{job.operation.title()} {job.status}: {job.files} files, {self.size(job.bytes)}" + (f" · {job.error}" if job.error else ""))
+        if self.transfer_alert:
+            self.transfers_button.set_label(f"⇄ !{len(running) or ''}")
+            self.transfers_button.add_css_class("transfer-alert")
+        else:
+            self.transfers_button.remove_css_class("transfer-alert")
         if running:
             progress = f"{len(running)} transfer(s) · " + " · ".join(
                 f"{job.files} files / {self.size(job.bytes)}" for job in running)
@@ -2892,10 +3102,10 @@ class Window(Gtk.ApplicationWindow):
             if self.mode != "files":
                 self.status.set_text(progress)
         else:
-            self.transfers_button.set_tooltip_text("Background transfers")
+            self.transfers_button.set_tooltip_text("Transfer failed — open for details" if self.transfer_alert else "Background transfers")
         if hasattr(self, "jobs_label") and self.jobs_label.get_parent():
             self.jobs_label.set_text("\n\n".join(
-                f"{job.status.upper()}   {job.files} files · {self.size(job.bytes)}\n{job.destination}\n{job.error}" for job in self.jobs) or "No transfers yet.")
+                f"{job.operation.upper()} {job.status.upper()}   {job.files} files · {self.size(job.bytes)}\n{job.destination / (job.target_name or job.sources[0].name)}\n{job.error}" for job in self.jobs) or "No transfers yet.")
             self.cancel_transfers_button.set_sensitive(bool(running))
         return True
 
@@ -2912,12 +3122,14 @@ class Window(Gtk.ApplicationWindow):
             jobs_scroll.set_size_request(360, 180)
             content.pack_start(jobs_scroll, True, True, 0)
             self.cancel_transfers_button = button("Cancel running transfers", lambda:
-                [job.cancel.set() for job in self.jobs if job.status in {"queued", "copying"}])
+                [job.cancel.set() for job in self.jobs if job.status in {"queued", "copying", "moving"}])
             content.pack_start(self.cancel_transfers_button, False, False, 0)
             self.transfer_popover.set_child(content)
         if self.transfer_popover.get_visible():
             self.transfer_popover.popdown()
             return
+        self.update_transfers()
+        self.transfer_alert = False
         self.update_transfers()
         self.transfer_popover.show()
         self.transfer_popover.popup()
@@ -3536,12 +3748,12 @@ class Window(Gtk.ApplicationWindow):
 
     def quit(self, confirmed=False, on_cancel=None):
         active_terminals = any(pid for _terminal, pid in self.terminals)
-        active_jobs = any(j.status in {"queued", "copying"} for j in self.jobs)
+        active_jobs = any(j.status in {"queued", "copying", "moving"} for j in self.jobs)
         if (active_terminals or active_jobs) and not confirmed:
             question = ("Quit Nightty and close its terminals?" if active_terminals
-                        else "Quit Nightty and cancel unfinished copies?")
+                        else "Quit Nightty and cancel unfinished transfers?")
             confirm(self, question,
-                    "Hiding keeps everything running. Quitting closes embedded terminals and cancels unfinished copies; completed files are kept.",
+                    "Hiding keeps everything running. Quitting closes embedded terminals and cancels unfinished transfers; completed files are kept.",
                     lambda: self.quit(confirmed=True), on_cancel)
             return False
         for job in self.jobs:
@@ -3629,7 +3841,9 @@ class Window(Gtk.ApplicationWindow):
         elif key == "F4":
             self.open_external()
         elif key == "F5" and self.mode in {"files", "gallery"}:
-            self.copy()
+            self.copy(same_folder=shift)
+        elif key == "F6" and self.mode in {"files", "gallery"}:
+            self.move(same_folder=shift)
         else:
             return False
         return True

@@ -2,6 +2,8 @@
 """Filesystem views and explicit background transfers; no agent execution."""
 
 from dataclasses import dataclass, field
+import ctypes
+import errno
 import json
 import os
 from pathlib import Path
@@ -145,6 +147,19 @@ class Cancelled(Exception):
     pass
 
 
+def rename_noreplace(source, target):
+    """Atomically rename without replacing a name created after preflight."""
+    rename = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+    if rename is None:
+        raise OSError(errno.ENOSYS, "renameat2 is unavailable", os.fspath(target))
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+                       ctypes.c_char_p, ctypes.c_uint)
+    rename.restype = ctypes.c_int
+    if rename(-100, os.fsencode(source), -100, os.fsencode(target), 1) != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), os.fspath(target))
+
+
 @dataclass
 class Transfer:
     sources: list[Path]
@@ -154,29 +169,67 @@ class Transfer:
     bytes: int = 0
     error: str = ""
     cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+    target_name: str | None = None
+    operation: str = "copy"
+    method: str = ""
 
     def run(self):
-        self.status = "copying"
+        self.status = "moving" if self.operation == "move" else "copying"
         try:
+            if self.operation not in {"copy", "move"}:
+                raise ValueError("unknown transfer operation")
+            if self.cancel.is_set():
+                raise Cancelled()
             self.destination = self.destination.resolve(strict=True)
             if not self.destination.is_dir():
                 raise ValueError("destination is not a directory")
+            if self.target_name is not None:
+                if len(self.sources) != 1 or self.target_name in {"", ".", ".."} or Path(self.target_name).name != self.target_name:
+                    raise ValueError("a target name requires exactly one source and no path separators")
             # Validate every top-level destination before starting the batch.
             for source in self.sources:
                 source = Path(source)
-                target = self.destination / source.name
+                source.lstat()
+                target = self.destination / (self.target_name or source.name)
                 if target.exists() or target.is_symlink():
                     raise FileExistsError(f"Already exists: {target.name}")
                 if source.is_dir() and not source.is_symlink() and self.destination.is_relative_to(source.resolve()):
-                    raise ValueError("cannot copy a directory inside itself")
+                    raise ValueError("cannot transfer a directory inside itself")
             for source in self.sources:
-                self._copy(Path(source), self.destination / Path(source).name)
+                source = Path(source)
+                target = self.destination / (self.target_name or source.name)
+                if self.cancel.is_set():
+                    raise Cancelled()
+                if self.operation == "move":
+                    self._move(source, target)
+                else:
+                    self._copy(source, target)
             self.status = "completed"
         except Cancelled:
             self.status = "cancelled"
         except Exception as exc:
             self.status, self.error = "failed", str(exc)
         return self
+
+    def _move(self, source, target):
+        # A rename is instantaneous on one filesystem; EXDEV covers mount edges.
+        if source.lstat().st_dev == self.destination.stat().st_dev:
+            try:
+                rename_noreplace(source, target)
+                self.method = "rename"
+                self.files += 1
+                return
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+        self.method = "copy and remove"
+        self._copy(source, target)
+        if self.cancel.is_set():
+            raise Cancelled()
+        if source.is_dir() and not source.is_symlink():
+            shutil.rmtree(source)
+        else:
+            source.unlink()
 
     def _copy(self, source, target):
         if self.cancel.is_set():

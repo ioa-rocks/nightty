@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: MPL-2.0
 import json
+import errno
 import os
 from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from workspace.agents import Agents
 from workspace.appearance import load_appearance
@@ -116,6 +118,60 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(job.status, "failed")
         self.assertFalse((destination / "a").exists())
         self.assertEqual((destination / "b").read_text(), "keep")
+
+    def test_copy_to_edited_name_and_refuse_existing_name(self):
+        source = self.root / "file1"
+        source.write_text("copy me")
+        copied = Transfer([source], self.root, target_name="file2").run()
+        self.assertEqual(copied.status, "completed", copied.error)
+        self.assertEqual((self.root / "file2").read_text(), "copy me")
+        self.assertEqual(source.read_text(), "copy me")
+        repeated = Transfer([source], self.root, target_name="file2").run()
+        self.assertEqual(repeated.status, "failed")
+        self.assertEqual((self.root / "file2").read_text(), "copy me")
+
+    def test_same_filesystem_move_uses_atomic_rename_without_clobbering(self):
+        source = self.root / "old"
+        source.mkdir()
+        (source / "item").write_text("keep")
+        moved = Transfer([source], self.root, target_name="new", operation="move").run()
+        self.assertEqual(moved.status, "completed", moved.error)
+        self.assertEqual(moved.method, "rename")
+        self.assertFalse(source.exists())
+        self.assertEqual((self.root / "new/item").read_text(), "keep")
+        another = self.root / "another"
+        another.write_text("original")
+        blocked = Transfer([another], self.root, target_name="new", operation="move").run()
+        self.assertEqual(blocked.status, "failed")
+        self.assertEqual(another.read_text(), "original")
+
+    def test_cross_filesystem_move_falls_back_to_copy_then_remove(self):
+        source = self.root / "file1"
+        source.write_text("move me")
+        with mock.patch("workspace.model.rename_noreplace", side_effect=OSError(errno.EXDEV, "other filesystem")):
+            moved = Transfer([source], self.root, target_name="file2", operation="move").run()
+        self.assertEqual(moved.status, "completed", moved.error)
+        self.assertEqual(moved.method, "copy and remove")
+        self.assertFalse(source.exists())
+        self.assertEqual((self.root / "file2").read_text(), "move me")
+
+    def test_cancelled_cross_filesystem_move_preserves_source(self):
+        source = self.root / "big.bin"
+        source.write_bytes(b"x" * 4_000_000)
+
+        class CancelDuringRead:
+            calls = 0
+
+            def is_set(self):
+                self.calls += 1
+                return self.calls >= 5
+
+        with mock.patch("workspace.model.rename_noreplace", side_effect=OSError(errno.EXDEV, "other filesystem")):
+            moved = Transfer([source], self.root, target_name="other.bin", operation="move",
+                             cancel=CancelDuringRead()).run()
+        self.assertEqual(moved.status, "cancelled")
+        self.assertTrue(source.exists())
+        self.assertFalse((self.root / "other.bin").exists())
 
     def test_file_listing_has_stable_directory_first_order_and_hidden_toggle(self):
         (self.root / "z-folder").mkdir()
