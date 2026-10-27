@@ -2,6 +2,7 @@
   "palette": {
     "background": "#073642",
     "surface": "#002b36",
+    "dialog_background": "#124663",
     "header": "#002b36",
     "header_text": "#fdf6e3",
     "foreground": "#fdf6e3",

@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -18,6 +19,22 @@ class WorkspaceTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+
+    def run_with_conflict_choice(self, job, choice):
+        worker = threading.Thread(target=job.run, daemon=True)
+        worker.start()
+        try:
+            deadline = time.monotonic() + 3
+            while job.conflict is None and worker.is_alive() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertIsNotNone(job.conflict, (job.status, job.error))
+            self.assertTrue(job.answer_conflict(job.conflict, choice))
+            worker.join(3)
+            self.assertFalse(worker.is_alive(), "transfer waited for another conflict")
+            return job
+        finally:
+            job.cancel.set()
+            worker.join(1)
 
     def test_inherited_context_keeps_reference_origin_and_nested_projects(self):
         parent = self.root / "startup"
@@ -146,6 +163,178 @@ class WorkspaceTests(unittest.TestCase):
         repeated = Transfer([source], self.root, target_name="file2").run()
         self.assertEqual(repeated.status, "failed")
         self.assertEqual((self.root / "file2").read_text(), "copy me")
+
+    def test_overwrite_all_and_none_apply_to_later_files(self):
+        source, target = self.root / "source", self.root / "target"
+        source.mkdir()
+        target.mkdir()
+        for name in ("a", "b"):
+            (source / name).write_text(f"new {name}")
+            (target / name).write_text(f"old {name}")
+        all_job = self.run_with_conflict_choice(
+            Transfer([source / "a", source / "b"], target, interactive=True), "all")
+        self.assertEqual(all_job.status, "completed", all_job.error)
+        self.assertEqual([(target / name).read_text() for name in ("a", "b")], ["new a", "new b"])
+        for name in ("a", "b"):
+            (target / name).write_text(f"old {name}")
+        none_job = self.run_with_conflict_choice(
+            Transfer([source / "a", source / "b"], target, interactive=True), "none")
+        self.assertEqual(none_job.status, "completed", none_job.error)
+        self.assertEqual(none_job.skipped, 2)
+        self.assertEqual([(target / name).read_text() for name in ("a", "b")], ["old a", "old b"])
+
+    def test_no_skips_only_one_conflict_and_prompts_for_the_next(self):
+        source, target = self.root / "source", self.root / "target"
+        source.mkdir()
+        target.mkdir()
+        for name in ("a", "b"):
+            (source / name).write_text(f"new {name}")
+            (target / name).write_text(f"old {name}")
+        job = Transfer([source / "a", source / "b"], target, interactive=True)
+        worker = threading.Thread(target=job.run, daemon=True)
+        worker.start()
+        try:
+            for expected, decision in (("a", "no"), ("b", "yes")):
+                deadline = time.monotonic() + 3
+                while (job.conflict is None or job.conflict.source.name != expected) and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertIsNotNone(job.conflict)
+                self.assertEqual(job.conflict.source.name, expected)
+                self.assertTrue(job.answer_conflict(job.conflict, decision))
+            worker.join(3)
+            self.assertFalse(worker.is_alive())
+        finally:
+            job.cancel.set()
+            worker.join(1)
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual((target / "a").read_text(), "old a")
+        self.assertEqual((target / "b").read_text(), "new b")
+
+    def test_cancelling_while_waiting_for_overwrite_keeps_both_files(self):
+        source, target_dir = self.root / "source", self.root / "target"
+        target_dir.mkdir()
+        source.write_text("new")
+        (target_dir / "source").write_text("old")
+        job = Transfer([source], target_dir, interactive=True)
+        worker = threading.Thread(target=job.run, daemon=True)
+        worker.start()
+        deadline = time.monotonic() + 3
+        while job.conflict is None and worker.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIsNotNone(job.conflict)
+        job.cancel.set()
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(job.status, "cancelled")
+        self.assertEqual(source.read_text(), "new")
+        self.assertEqual((target_dir / "source").read_text(), "old")
+
+    def test_size_differs_skips_equal_sizes_and_replaces_other_files(self):
+        source, target = self.root / "source", self.root / "target"
+        source.mkdir()
+        target.mkdir()
+        (source / "a").write_text("new")
+        (target / "a").write_text("old")
+        (source / "b").write_text("newer")
+        (target / "b").write_text("old")
+        job = self.run_with_conflict_choice(
+            Transfer([source / "a", source / "b"], target, interactive=True), "size_differs")
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(job.skipped, 1)
+        self.assertEqual((target / "a").read_text(), "old")
+        self.assertEqual((target / "b").read_text(), "newer")
+
+    def test_directory_merge_prompts_for_nested_file_and_preserves_other_contents(self):
+        source, target = self.root / "source", self.root / "target"
+        (source / "nested").mkdir(parents=True)
+        (target / "source/nested").mkdir(parents=True)
+        (source / "nested/item").write_text("new")
+        (target / "source/nested/item").write_text("old")
+        (target / "source/keep").write_text("keep")
+        job = self.run_with_conflict_choice(Transfer([source], target, interactive=True), "yes")
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual((target / "source/nested/item").read_text(), "new")
+        self.assertEqual((target / "source/keep").read_text(), "keep")
+
+    def test_move_skip_leaves_conflicting_source_in_place(self):
+        source, target = self.root / "source", self.root / "target"
+        source.mkdir()
+        (target / "source").mkdir(parents=True)
+        (source / "conflict").write_text("new")
+        (source / "fresh").write_text("move")
+        (target / "source/conflict").write_text("old")
+        job = self.run_with_conflict_choice(
+            Transfer([source], target, operation="move", interactive=True), "no")
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual((target / "source/conflict").read_text(), "old")
+        self.assertEqual((target / "source/fresh").read_text(), "move")
+        self.assertEqual((source / "conflict").read_text(), "new")
+        self.assertFalse((source / "fresh").exists())
+
+    def test_move_yes_replaces_existing_file_and_abort_preserves_both(self):
+        source, target = self.root / "source", self.root / "target"
+        source.mkdir()
+        target.mkdir()
+        (source / "item").write_text("new")
+        (target / "item").write_text("old")
+        aborted = self.run_with_conflict_choice(
+            Transfer([source / "item"], target, operation="move", interactive=True), "abort")
+        self.assertEqual(aborted.status, "cancelled")
+        self.assertEqual((source / "item").read_text(), "new")
+        self.assertEqual((target / "item").read_text(), "old")
+        moved = self.run_with_conflict_choice(
+            Transfer([source / "item"], target, operation="move", interactive=True), "yes")
+        self.assertEqual(moved.status, "completed", moved.error)
+        self.assertEqual(moved.method, "rename")
+        self.assertFalse((source / "item").exists())
+        self.assertEqual((target / "item").read_text(), "new")
+
+    def test_cross_filesystem_move_replaces_only_after_copy_is_published(self):
+        source, target_dir = self.root / "source", self.root / "target"
+        target_dir.mkdir()
+        source.write_text("replacement")
+        (target_dir / "source").write_text("original")
+        native_replace = os.replace
+
+        def different_filesystem(old, new):
+            if Path(old) == source:
+                raise OSError(errno.EXDEV, "other filesystem")
+            return native_replace(old, new)
+
+        with mock.patch("workspace.model.os.replace", side_effect=different_filesystem):
+            job = self.run_with_conflict_choice(
+                Transfer([source], target_dir, operation="move", interactive=True), "yes")
+        self.assertEqual(job.status, "completed", job.error)
+        self.assertEqual(job.method, "copy and remove")
+        self.assertFalse(source.exists())
+        self.assertEqual((target_dir / "source").read_text(), "replacement")
+
+    def test_older_and_smaller_policies_apply_to_following_conflicts(self):
+        source, target = self.root / "source", self.root / "target"
+        source.mkdir()
+        target.mkdir()
+        for name, source_text, target_text in (("a", "new a", "old a"),
+                                               ("b", "new b", "old b")):
+            (source / name).write_text(source_text)
+            (target / name).write_text(target_text)
+        os.utime(source / "a", ns=(2_000_000_000, 2_000_000_000))
+        os.utime(target / "a", ns=(1_000_000_000, 1_000_000_000))
+        os.utime(source / "b", ns=(1_000_000_000, 1_000_000_000))
+        os.utime(target / "b", ns=(2_000_000_000, 2_000_000_000))
+        older = self.run_with_conflict_choice(
+            Transfer([source / "a", source / "b"], target, interactive=True), "older")
+        self.assertEqual(older.status, "completed", older.error)
+        self.assertEqual(older.skipped, 1)
+        self.assertEqual((target / "a").read_text(), "new a")
+        self.assertEqual((target / "b").read_text(), "old b")
+        (target / "a").write_text("long old a")
+        (target / "b").write_text("old")
+        smaller = self.run_with_conflict_choice(
+            Transfer([source / "a", source / "b"], target, interactive=True), "smaller")
+        self.assertEqual(smaller.status, "completed", smaller.error)
+        self.assertEqual(smaller.skipped, 1)
+        self.assertEqual((target / "a").read_text(), "new a")
+        self.assertEqual((target / "b").read_text(), "old")
 
     def test_same_filesystem_move_uses_atomic_rename_without_clobbering(self):
         source = self.root / "old"

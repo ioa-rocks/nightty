@@ -402,6 +402,155 @@ def smoke(args, controls_only=False):
                     checks.append("visible mode, location, view, and reversible sort controls")
                     checks.append("location choices retain visible focus while moving down")
                     checks.append("popup keys follow Sort, View, Favourites order")
+                    menu.popdown()
+                    pane.focus_file_path(child / "draft.md")
+                    dialog = window.copy()
+                    assert isinstance(dialog, Gtk.Window)
+                    step["copy_dialog"] = dialog
+                    step["number"] = 42
+                    return True
+                if controls_only and step["number"] == 42:
+                    dialog = step["copy_dialog"]
+                    choices = widget_children(dialog.get_child().get_last_child())
+                    assert [choice.get_label() for choice in choices] == ["_Yes", "_Background", "_Cancel"]
+                    assert dialog.get_default_widget() is choices[0]
+                    assert dialog.get_focus() is choices[0]
+                    assert all(choice.get_receives_default() for choice in choices)
+                    assert choices[0].has_css_class("mc-dialog-focused")
+                    choices[1].grab_focus()
+                    step["number"] = 43
+                    return True
+                if controls_only and step["number"] == 43:
+                    dialog = step["copy_dialog"]
+                    choices = widget_children(dialog.get_child().get_last_child())
+                    assert dialog.get_focus() is choices[1]
+                    assert not choices[0].has_css_class("mc-dialog-focused")
+                    assert choices[1].has_css_class("mc-dialog-focused")
+                    dialog.destroy()
+                    checks.append("copy dialog focus fill follows the selected action")
+                    step["same_folder_dialog"] = window.copy(same_folder=True)
+                    step["number"] = 44
+                    return True
+                if controls_only and step["number"] in {44, 45}:
+                    dialog = step["same_folder_dialog"]
+                    fields = widget_children(dialog.get_child())[1]
+                    destination = widget_children(fields)[3]
+                    source = child / "draft.md"
+                    assert destination.get_text() == str(source)
+                    focus = dialog.get_focus()
+                    assert focus is destination or focus.get_parent() is destination
+                    assert destination.get_selection_bounds()[-2:] == (
+                        len(str(source.parent)) + 1, len(str(source)))
+                    if step["number"] == 45:
+                        destination.set_text("")
+                        destination.emit("activate")
+                        error = widget_children(dialog.get_child())[3]
+                        assert error.get_visible() and error.get_text() == "Enter a destination."
+                    dialog.destroy()
+                    if step["number"] == 44:
+                        step["same_folder_dialog"] = window.move(same_folder=True)
+                        step["number"] = 45
+                        return True
+                    checks.append("same-folder copy and rename focus the selected destination filename; Enter runs Yes")
+                    job = window.start_transfer([child / "draft.md"], output, background=False)
+                    step["foreground_job"] = job
+                    step["foreground_dialog"] = window.show_transfer_progress(job)
+                    step["number"] = 46
+                    return True
+                if controls_only and step["number"] == 46:
+                    job = step["foreground_job"]
+                    assert job.status in {"queued", "copying", "completed"}, (job.status, job.error)
+                    if job.status != "completed" or step["foreground_dialog"].get_visible():
+                        return True
+                    assert (output / "draft.md").read_bytes() == (child / "draft.md").read_bytes()
+                    checks.append("successful foreground copy closes its progress dialog")
+                    job = window.start_transfer([child / "draft.md"], output, background=False)
+                    step["foreground_job"] = job
+                    step["foreground_dialog"] = window.show_transfer_progress(job)
+                    step["number"] = 47
+                    return True
+                if controls_only and step["number"] == 47:
+                    job = step["foreground_job"]
+                    if job.status in {"queued", "copying"} or getattr(job, "conflict_dialog", None) is None:
+                        return True
+                    assert job.status == "conflict" and job.conflict is not None
+                    conflict_dialog = job.conflict_dialog
+                    rows = widget_children(conflict_dialog.get_child())[2:]
+                    choices = [choice for row in rows for choice in widget_children(row)]
+                    assert [choice.get_label() for choice in choices] == [
+                        "_Yes", "_No", "_Abort", "_All", "N_one", "Size _differs",
+                        "If _older", "If _smaller"]
+                    assert conflict_dialog.get_default_widget() is choices[0]
+                    choices[1].emit("clicked")
+                    step["number"] = 48
+                    return True
+                if controls_only and step["number"] == 48:
+                    job = step["foreground_job"]
+                    if job.status != "completed" or step["foreground_dialog"].get_visible():
+                        return True
+                    assert job.skipped == 1
+                    assert (output / "draft.md").read_bytes() == (child / "draft.md").read_bytes()
+                    checks.append("foreground conflict offers MC overwrite choices and No skips one file")
+                    step["background_job"] = window.start_transfer(
+                        [child / "draft.md"], output, background=True)
+                    step["number"] = 49
+                    return True
+                if controls_only and step["number"] == 49:
+                    job = step["background_job"]
+                    if job.status in {"queued", "copying"}:
+                        return True
+                    assert job.status == "conflict" and job.conflict is not None
+                    window.update_transfers()
+                    assert window.transfers_button.has_css_class("transfer-alert")
+                    window.show_jobs()
+                    choices = [choice for row in widget_children(job.conflict_dialog.get_child())[2:]
+                               for choice in widget_children(row)]
+                    choices[5].emit("clicked")
+                    step["number"] = 50
+                    return True
+                if controls_only and step["number"] == 50:
+                    job = step["background_job"]
+                    if job.status != "completed":
+                        return True
+                    assert job.skipped == 1
+                    window.update_transfers()
+                    assert not window.transfers_button.has_css_class("transfer-alert")
+                    checks.append("background conflict alerts in Transfers and Size differs skips equal files")
+                    pane = window.panes[0]
+                    pane.navigate(child)
+                    while pane.path != Path("/"):
+                        pane.up()
+                    step["number"] = 51
+                    return True
+                if controls_only and step["number"] == 51:
+                    pane = window.panes[0]
+                    if (pane.path != Path("/") or "loading" in pane.count.get_text().lower()
+                            or pane.model_fill_source or not pane.geometry_measured):
+                        return True
+                    target_index = min(pane.capacity - 1, len(pane.entries) - 1)
+                    assert target_index > 4
+                    target = Path(pane.entries[target_index][3])
+                    pane.focus_file_path(target)
+                    step["number"] = 52
+                    return True
+                if controls_only and step["number"] == 52:
+                    pane = window.panes[0]
+                    cursor = pane.view.get_cursor()[1]
+                    assert cursor is not None and pane.view.path_is_selected(cursor)
+                    found, rect = pane.view.get_cell_rect(cursor, None)
+                    assert found
+                    row_y = rect.y + pane.item_pitch() // 2 - pane.scroll.get_vadjustment().get_value()
+                    assert row_y < pane.column_visible_bottom(
+                        pane.scroll_overlay.drawing_area.get_allocated_height())
+                    surface = screenshot("rapid-up-root")
+                    assert surface is not None
+                    x, y = pane.view.translate_coordinates(window.get_child(),
+                        rect.x + pane.view.get_item_width() // 2, rect.y + pane.item_pitch() // 2)
+                    pixel = bytes(surface.get_data())[(int(y) * surface.get_stride() + int(x) * 4):
+                                                       (int(y) * surface.get_stride() + int(x) * 4 + 4)]
+                    accent = window.palette["accent"]
+                    assert pixel[:3] == bytes.fromhex(accent[5:7] + accent[3:5] + accent[1:3]), pixel
+                    checks.append("rapid Up navigation to root keeps lower rows and cursor visible")
                     app.quit()
                     return False
                 if step["number"] == 0 and not step.get("footer_checked"):
@@ -1073,10 +1222,17 @@ def smoke(args, controls_only=False):
                     assert window.stack.get_visible_child_name() == "console"
                     assert "WORKSPACE_COMMAND_OK" in terminal.get_text_format(Vte.Format.TEXT)
                     checks.append("persistent full-window shell output and Ctrl+O panel toggle")
-                    assert not window.terminal_shortcut(terminal,
+                    assert window.key(window,
+                        argparse.Namespace(keyval=Gdk.KEY_p, state=Gdk.ModifierType.CONTROL_MASK))
+                    assert window.mode == "project"
+                    assert window.key(window,
                         argparse.Namespace(keyval=Gdk.KEY_p, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "console"
-                    checks.append("terminal Ctrl+P remains available to shell programs")
+                    assert window.terminal_shortcut(terminal,
+                        argparse.Namespace(keyval=Gdk.KEY_p,
+                                           state=Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK))
+                    terminal.feed_child(b"\x15")
+                    checks.append("idle shell Ctrl+P opens Project; Ctrl+Shift+P sends shell history key")
                     window.set_mode("project")
                     assert window.mode == "project"
                     window.key(window, argparse.Namespace(keyval=Gdk.KEY_Escape, state=0))
@@ -1084,6 +1240,17 @@ def smoke(args, controls_only=False):
                     window.mode_shortcut("p")
                     assert window.mode == "console"
                     window.set_mode("files")
+                    assert window.mode_shortcut("p") and window.mode == "project"
+                    assert window.mode_shortcut("p") and window.mode == "files"
+                    assert window.get_focus() is window.active.view
+                    window.mode_shortcut("p")
+                    window.mode_shortcut("o")
+                    assert window.mode == "console"
+                    window.mode_shortcut("o")
+                    assert window.mode == "project"
+                    window.mode_shortcut("p")
+                    assert window.mode == "files"
+                    checks.append("Ctrl+P returns to Commander after Project and Ctrl+O shell detours")
                     assert window.command_entry_key(window.command_entry,
                         argparse.Namespace(keyval=Gdk.KEY_i, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "gallery"
@@ -1140,6 +1307,9 @@ def smoke(args, controls_only=False):
                     if pane.gallery_building or not widget_children(pane.gallery_flow):
                         return True
                     window.focus_active_browser()
+                    assert window.mode_shortcut("p") and window.mode == "project"
+                    assert window.mode_shortcut("p") and window.mode == "gallery"
+                    checks.append("Ctrl+P returns to Gallery when Project was opened there")
                     focused_card = pane.gallery_flow.get_focus_child()
                     assert focused_card is not None
                     assert window.key(window,
@@ -1378,8 +1548,12 @@ def smoke(args, controls_only=False):
                         return True
                     assert not window.terminal_shortcut(shell,
                         argparse.Namespace(keyval=Gdk.KEY_o, state=Gdk.ModifierType.CONTROL_MASK))
+                    assert not window.key(window,
+                        argparse.Namespace(keyval=Gdk.KEY_p, state=Gdk.ModifierType.CONTROL_MASK))
+                    assert not window.terminal_shortcut(shell,
+                        argparse.Namespace(keyval=Gdk.KEY_p, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "console"
-                    checks.append("Ctrl+O reaches a foreground terminal program")
+                    checks.append("Ctrl+O and Ctrl+P reach foreground terminal programs")
                     step["number"] = 25
                 elif number == 25:
                     shell = window.terminals[0][0]
@@ -1582,12 +1756,16 @@ def smoke(args, controls_only=False):
         GLib.timeout_add(150, run)
         app.run([sys.argv[0]])
         slow_continue.set()
+        if app.window is not None:
+            for job in app.window.jobs:
+                job.cancel.set()
         if app.result == 0:
             if controls_only:
-                assert step["number"] == 41
+                assert step["number"] == 52
                 print(json.dumps({"checks": checks,
                                   "screenshots": ["/tmp/workspace-terminal-start.png",
-                                                  "/tmp/workspace-files-controls.png"]}), flush=True)
+                                                  "/tmp/workspace-files-controls.png",
+                                                  "/tmp/workspace-rapid-up-root.png"]}), flush=True)
             else:
                 assert step["number"] == 35 and not app.window.terminals
                 checks.append("exiting the final shell quits Nightty")

@@ -42,8 +42,8 @@ optional agent backend. The existing browser AgentConsole remains independent.
   Going to a parent selects the
   directory just left. Large folders render their first screen before later rows;
   slow directory scans show partial results while the rest arrive.
-  Quick navigation, filename search and file operations remain available without
-  replacing existing destinations.
+  Quick navigation, filename search and file operations remain available with
+  explicit choices when destination files already exist.
 - Ctrl+I switches the active pane between Files and Gallery; the other pane
   keeps its own view. Tab changes the active pane without changing either view.
   Compact horizontal cards fill the left column before the right and show a
@@ -170,13 +170,19 @@ entry count and available filesystem space. The command line below uses a
 `user@host:path$` prompt. F5 copies marked entries, or the current entry when
 nothing is marked; F6 moves them. Gallery uses its own selection. Both dialogs
 show the source and an editable destination, with Yes, Background and Cancel.
-Yes shows progress with Switch to Background and Cancel. Shift+F5 suggests the
-current file's own path so its name can be edited for a copy in the same folder;
+Yes shows progress with Switch to Background and Cancel, then closes on success.
+Shift+F5 suggests the
+current file's own path and focuses its selected filename for a copy in the same folder;
 Shift+F6 does the same for rename. Transfers run in a worker. They preserve
-symbolic links and refuse existing destinations. Each regular file is
-written to a temporary sibling and published without overwriting another name.
+symbolic links and merge existing destination directories. For existing files,
+the overwrite dialog shows both sizes and dates and offers Yes, No, All, None,
+If older, If smaller, Size differs and Abort. Background conflicts alert on the
+Transfers button until resolved. Each regular file is
+written to a temporary sibling and published atomically, replacing an existing
+destination only after an overwrite choice allows it.
 Directory transfers can leave already completed entries on cancellation/failure;
-the transfer panel reports that state. Same-filesystem moves use an atomic rename;
+directory moves leave skipped source entries in place. The transfer panel reports
+skipped counts. Same-filesystem moves use an atomic rename;
 cross-filesystem moves copy first, then remove the source. Cancellation is
 cooperative. Background failures ring the desktop bell and leave an alert on the
 transfer button until the transfer panel is opened. Transfer progress is desktop
@@ -222,8 +228,10 @@ search again; Escape or Close returns to the original folder. This search finds
   sends Ctrl+V to a foreground program when the clipboard contains an image.
   Image attachment depends on that program's clipboard support and access to
   the local clipboard. Ctrl+click opens terminal links and simple file paths.
-- In native views, Ctrl+P opens Project (press again for Shell); Ctrl+I
-  switches Gallery and Files. Terminal programs keep their own Ctrl+P and Ctrl+I.
+- Ctrl+P opens Project from Files, Gallery, or an idle shell; pressing it again
+  returns to that view. Foreground terminal programs receive Ctrl+P, and
+  Ctrl+Shift+P sends a literal Ctrl+P to the idle shell for command history.
+  Ctrl+O switches to Shell; Ctrl+I switches Gallery and Files in native views.
 - Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 select Files / Project / Shell / Gallery
   from native views or an idle shell. Foreground terminal programs receive
   their own keys.

@@ -171,6 +171,21 @@ def button(text, callback):
     return widget
 
 
+def dialog_button(widget):
+    widget.add_css_class("mc-dialog-button")
+    widget.set_receives_default(True)
+    widget.set_hexpand(True)
+
+    def focus_changed(button, _property):
+        if button.has_focus():
+            button.add_css_class("mc-dialog-focused")
+        else:
+            button.remove_css_class("mc-dialog-focused")
+
+    widget.connect("notify::has-focus", focus_changed)
+    return widget
+
+
 def yes_no_dialog(parent, text, secondary=None):
     dialog = Gtk.Window(transient_for=parent, modal=True)
     dialog.set_decorated(False)
@@ -204,12 +219,10 @@ def yes_no_dialog(parent, text, secondary=None):
     no = Gtk.Button(label="_No", use_underline=True)
     yes = Gtk.Button(label="_Yes", use_underline=True)
     for choice in (yes, no):
-        choice.add_css_class("mc-dialog-button")
-        choice.set_hexpand(True)
+        dialog_button(choice)
     actions.append(no)
     actions.append(yes)
     content.append(actions)
-    yes.add_css_class("mc-dialog-default")
     dialog.set_default_widget(yes)
     return dialog, yes, no
 
@@ -382,7 +395,8 @@ class Pane(Box):
         self.view.set_item_width(300)
         self.view.set_item_padding(1)
         self.view.set_row_spacing(0)
-        self.view.set_column_spacing(2)
+        self.file_column_spacing = 2
+        self.view.set_column_spacing(self.file_column_spacing)
         self.view.set_margin(0)
         self.view.set_item_orientation(Gtk.Orientation.HORIZONTAL)
         self.entries = []
@@ -426,7 +440,8 @@ class Pane(Box):
         # IconView otherwise gives fallback fonts (for example Japanese names)
         # taller cells, breaking the fixed-height two-column navigation grid.
         self.row_text_height = self.view.create_pango_layout("Ag").get_pixel_size()[1]
-        marker = Gtk.CellRendererText(xpad=1, ypad=0, width_chars=1,
+        self.prefix_xpad = 2
+        marker = Gtk.CellRendererText(xpad=self.prefix_xpad, ypad=0, width_chars=1,
                                       weight=self.window.appearance["fonts"]["files_weight"])
         marker.set_fixed_size(-1, self.row_text_height)
         self.view.pack_start(marker, False)
@@ -1067,6 +1082,8 @@ class Pane(Box):
         return self.row_pitch
 
     def scroll_changed(self, _adjustment):
+        if hasattr(self, "scroll_overlay"):
+            self.scroll_overlay.drawing_area.queue_draw()
         if self.snapping_scroll or not self.geometry_measured or not self.entries:
             return
         if self.align_after_navigation and _adjustment.get_value() > 0:
@@ -1182,6 +1199,7 @@ class Pane(Box):
             self.scroll.get_vadjustment().set_value(desired_top * self.item_pitch())
             GLib.timeout_add(200, self.clear_navigation_alignment, self.navigation_align_serial)
         self.view.handler_unblock(self.cursor_handler)
+        self.scroll_overlay.drawing_area.queue_draw()
         if self is self.window.active:
             self.selected()
         if self.model_next_start < self.model_rows():
@@ -1237,6 +1255,7 @@ class Pane(Box):
             self.staging_next_start = end
         else:
             self.model_next_start = end
+            self.scroll_overlay.drawing_area.queue_draw()
 
     def fill_model_page(self):
         if self.staging_store is None:
@@ -1271,6 +1290,7 @@ class Pane(Box):
         self.path_to_stores = self.staging_path_to_stores
         self.staging_store = None
         self.model_next_start = self.model_rows()
+        self.scroll_overlay.drawing_area.queue_draw()
         if target is not None:
             path = Gtk.TreePath.new_from_indices([self.store_position(target)])
             self.view.set_cursor(path, None, False)
@@ -1378,18 +1398,18 @@ class Pane(Box):
             foreground = color or self.window.palette["background"]
         renderer.set_property("foreground", foreground)
 
+    def column_visible_bottom(self, height):
+        # IconView's visible range can lag a model swap after a fast navigation.
+        pitch = max(1, self.item_pitch())
+        scroll = self.scroll.get_vadjustment().get_value()
+        model_bottom = self.top_inset + self.model_next_start * pitch - scroll
+        full_rows = max(0, math.floor((height + scroll - self.top_inset) / pitch))
+        viewport_bottom = self.top_inset + full_rows * pitch - scroll
+        return max(0, min(height, model_bottom, viewport_bottom))
+
     def draw_column_divider(self, widget, context):
         height = widget.get_allocated_height()
-        visible_bottom = height
-        # The clipped bottom row repeats the right column's first item.
-        visible_range = self.view.get_visible_range()
-        if visible_range is not None:
-            _first, last = visible_range
-            found, rect = self.view.get_cell_rect(last, None)
-            if found and 0 <= rect.y < height:
-                row_bottom = rect.y + self.item_pitch()
-                visible_bottom = max(0, min(height,
-                    rect.y if row_bottom > height else row_bottom))
+        visible_bottom = self.column_visible_bottom(height)
         background = Gdk.RGBA()
         background.parse(self.window.palette["background"])
         context.set_source_rgba(background.red, background.green, background.blue, background.alpha)
@@ -1398,8 +1418,11 @@ class Pane(Box):
         color = Gdk.RGBA()
         color.parse(self.window.palette["border"])
         context.set_source_rgba(color.red, color.green, color.blue, color.alpha)
-        x = widget.get_allocated_width() / 2
-        context.rectangle(round(x), 0, 2, height)
+        # IconView places column two before the viewport midpoint when it
+        # reserves room for a scrollbar. Match the outer border's marker gap.
+        x = self.view.get_item_width() + self.file_column_spacing + self.prefix_xpad
+        context.rectangle(0, 0, 2, height)
+        context.rectangle(x, 0, 2, height)
         context.fill()
         return False
 
@@ -1518,6 +1541,7 @@ class Window(Gtk.ApplicationWindow):
         self.command_terminal = None
         self.command_refresh_pending = False
         self.output_return_mode = "files"
+        self.project_return_mode = "files"
         self.terminal_sequence = 0
         self.current_workspace_tab = None
         self.restoring_workspace_tab = False
@@ -2440,8 +2464,9 @@ class Window(Gtk.ApplicationWindow):
                 if target == "files" and self.mode in {"files", "gallery"}:
                     self.focus_active_browser()
                 elif target == "files":
-                    self.set_mode(self.output_return_mode if self.output_return_mode in
-                                  {"files", "gallery"} else "files")
+                    return_mode = (self.project_previous_mode() if self.mode == "project"
+                                   else self.output_return_mode)
+                    self.set_mode(return_mode if return_mode in {"files", "gallery"} else "files")
                 else:
                     self.set_mode(target)
             self.menu_choice(menu, content, f"{prefix}{title}    {shortcut}", choose)
@@ -2506,7 +2531,11 @@ class Window(Gtk.ApplicationWindow):
         self.async_call(lambda: self.read_preview(path, 650, 650), shown,
             lambda exc: self.quick_document.get_buffer().set_text(f"Cannot preview {path.name}: {exc}") if serial == self.quick_serial else None)
 
-    def set_mode(self, mode):
+    def project_previous_mode(self):
+        terminal = self.current_workspace_tab
+        return getattr(terminal, "workspace_project_return_mode", self.project_return_mode)
+
+    def set_mode(self, mode, *, preserve_project_return=False):
         if mode not in {"files", "project", "console", "gallery", "inspect"}:
             mode = "files"
         previous_mode = self.mode
@@ -2530,6 +2559,14 @@ class Window(Gtk.ApplicationWindow):
         previous_pane_mode = (self.active.content_stack.get_visible_child_name()
                               if self.active is not None else "files")
         terminal = self.current_workspace_tab
+        if (mode == "project" and previous_mode != "project"
+                and not self.restoring_workspace_tab and not preserve_project_return):
+            return_mode = (self.inspector_return_mode if previous_mode == "inspect"
+                           else previous_mode)
+            self.project_return_mode = (return_mode if return_mode in {"files", "gallery", "console"}
+                                        else "files")
+            if terminal is not None:
+                terminal.workspace_project_return_mode = self.project_return_mode
         if mode == "console" and previous_mode != "console" and not self.restoring_workspace_tab:
             self.output_return_mode = previous_mode
             if terminal is not None:
@@ -2765,6 +2802,11 @@ class Window(Gtk.ApplicationWindow):
             context.set_source_rgba(background.red, background.green, background.blue, background.alpha)
             context.rectangle(0, bottom, pane.gallery_flow.get_allocated_width(), height - bottom)
             context.fill()
+        border = Gdk.RGBA()
+        border.parse(self.palette["border"])
+        context.set_source_rgba(border.red, border.green, border.blue, border.alpha)
+        context.rectangle(0, 0, 2, height)
+        context.fill()
         return False
 
     def gallery_scroll_changed(self, pane):
@@ -3352,10 +3394,8 @@ class Window(Gtk.ApplicationWindow):
         find = Gtk.Button(label="_Find", use_underline=True)
         cancel = Gtk.Button(label="_Cancel", use_underline=True)
         for choice in (find, cancel):
-            choice.add_css_class("mc-dialog-button")
-            choice.set_hexpand(True)
+            dialog_button(choice)
             actions.append(choice)
-        find.add_css_class("mc-dialog-default")
         dialog.set_default_widget(find)
 
         def begin():
@@ -3470,10 +3510,8 @@ class Window(Gtk.ApplicationWindow):
         create = Gtk.Button(label="_Create", use_underline=True)
         cancel = Gtk.Button(label="_Cancel", use_underline=True)
         for choice in (create, cancel):
-            choice.add_css_class("mc-dialog-button")
-            choice.set_hexpand(True)
+            dialog_button(choice)
             actions.append(choice)
-        create.add_css_class("mc-dialog-default")
         dialog.set_default_widget(create)
         creating = False
 
@@ -3573,8 +3611,7 @@ class Window(Gtk.ApplicationWindow):
         delete = Gtk.Button(label="_Delete", use_underline=True)
         cancel = Gtk.Button(label="_Cancel", use_underline=True)
         for choice in (delete, cancel):
-            choice.add_css_class("mc-dialog-button")
-            choice.set_hexpand(True)
+            dialog_button(choice)
             actions.append(choice)
         delete.add_css_class("mc-danger-default")
         dialog.set_default_widget(delete)
@@ -3620,9 +3657,8 @@ class Window(Gtk.ApplicationWindow):
         actions.add_css_class("mc-dialog-actions")
         content.append(actions)
         abort = Gtk.Button(label="_Abort", use_underline=True)
-        abort.add_css_class("mc-dialog-button")
+        dialog_button(abort)
         abort.add_css_class("mc-danger-default")
-        abort.set_hexpand(True)
         actions.append(abort)
         dialog.set_default_widget(abort)
 
@@ -3727,7 +3763,7 @@ class Window(Gtk.ApplicationWindow):
         destination_entry.set_text(str(suggested))
         destination_entry.set_hexpand(True)
         fields.append(destination_entry)
-        hint = label("Existing destinations are left unchanged.", "mc-dialog-detail")
+        hint = label("Existing files will ask before replacement.", "mc-dialog-detail")
         content.append(hint)
         error = label("", "mc-transfer-error")
         error.set_wrap(True)
@@ -3741,10 +3777,8 @@ class Window(Gtk.ApplicationWindow):
         background = Gtk.Button(label="_Background", use_underline=True)
         cancel = Gtk.Button(label="_Cancel", use_underline=True)
         for choice in (yes, background, cancel):
-            choice.add_css_class("mc-dialog-button")
-            choice.set_hexpand(True)
+            dialog_button(choice)
             actions.append(choice)
-        yes.add_css_class("mc-dialog-default")
         dialog.set_default_widget(yes)
         checking = False
 
@@ -3775,10 +3809,6 @@ class Window(Gtk.ApplicationWindow):
                         raise ValueError(f"Destination folder does not exist: {destination}")
                 else:
                     raise ValueError("Select an existing destination folder for multiple files.")
-                if target_name and (destination / target_name).exists():
-                    raise FileExistsError(f"Already exists: {destination / target_name}")
-                if target_name and (destination / target_name).is_symlink():
-                    raise FileExistsError(f"Already exists: {destination / target_name}")
                 return destination, target_name
 
             def failed(exc):
@@ -3807,13 +3837,15 @@ class Window(Gtk.ApplicationWindow):
         yes.connect("clicked", lambda *_: begin(False))
         background.connect("clicked", lambda *_: begin(True))
         cancel.connect("clicked", lambda *_: dialog.destroy())
-        destination_entry.connect("activate", lambda *_: begin(False))
+        destination_entry.connect("activate", lambda *_: yes.emit("clicked"))
         connect_key(dialog, lambda _widget, event: (dialog.destroy(), True)[1]
                     if event.keyval == Gdk.KEY_Escape else False, capture=True)
         dialog.present()
         if same_folder:
+            destination_entry.grab_focus()
             destination_entry.select_region(len(str(sources[0].parent)) + 1, -1)
-        yes.grab_focus()
+        else:
+            yes.grab_focus()
         return dialog
 
     def show_transfer_progress(self, job):
@@ -3841,14 +3873,12 @@ class Window(Gtk.ApplicationWindow):
         switch = Gtk.Button(label="Switch to _Background", use_underline=True)
         cancel = Gtk.Button(label="_Cancel", use_underline=True)
         for choice in (switch, cancel):
-            choice.add_css_class("mc-dialog-button")
-            choice.set_hexpand(True)
+            dialog_button(choice)
             actions.append(choice)
-        switch.add_css_class("mc-dialog-default")
         dialog.set_default_widget(switch)
 
         def close():
-            if job.status in {"queued", "copying", "moving"}:
+            if job.status in {"queued", "copying", "moving", "conflict"}:
                 job.background = True
             dialog.destroy()
 
@@ -3858,7 +3888,7 @@ class Window(Gtk.ApplicationWindow):
             message.set_text("Cancelling…")
 
         def closing(_dialog):
-            if job.status in {"queued", "copying", "moving"}:
+            if job.status in {"queued", "copying", "moving", "conflict"}:
                 job.background = True
             return False
 
@@ -3871,14 +3901,21 @@ class Window(Gtk.ApplicationWindow):
         def refresh():
             if not dialog.get_visible():
                 return False
+            if job.status == "conflict":
+                message.set_text("Waiting for an overwrite choice…")
+                self.show_conflict_dialog(job, parent=dialog)
+                return True
             if job.status in {"queued", "copying", "moving"}:
                 message.set_text(f"{job.files} files · {self.size(job.bytes)}")
                 progress.pulse()
                 return True
+            if job.status == "completed":
+                dialog.destroy()
+                return False
             message.set_text(f"{job.operation.title()} {job.status}: {job.files} files · {self.size(job.bytes)}")
             if job.error:
                 detail.set_text(job.error)
-            progress.set_fraction(1 if job.status == "completed" else 0)
+            progress.set_fraction(0)
             switch.set_label("_Close")
             cancel.set_visible(False)
             return False
@@ -3888,11 +3925,79 @@ class Window(Gtk.ApplicationWindow):
         GLib.timeout_add(120, refresh)
         return dialog
 
+    def show_conflict_dialog(self, job, parent=None):
+        conflict = job.conflict
+        if conflict is None:
+            return None
+        previous = getattr(job, "conflict_dialog", None)
+        if (previous is not None and previous.get_visible()
+                and getattr(previous, "nightty_conflict", None) is conflict):
+            return previous
+        dialog = Gtk.Window(transient_for=parent or self, modal=True)
+        dialog.set_decorated(False)
+        dialog.set_resizable(False)
+        dialog.add_css_class("mc-dialog")
+        dialog.nightty_conflict = conflict
+        job.conflict_dialog = dialog
+        content = Box(orientation=Gtk.Orientation.VERTICAL)
+        content.add_css_class("mc-dialog-content")
+        content.set_size_request(720, -1)
+        dialog.set_child(content)
+        content.append(label("FILE EXISTS", "mc-dialog-title"))
+        fields = Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        fields.add_css_class("mc-transfer-fields")
+        content.append(fields)
+        for caption, path, info in (("Source", conflict.source, conflict.source_stat),
+                                    ("Destination", conflict.target, conflict.target_stat)):
+            modified = datetime.fromtimestamp(info.st_mtime).strftime("%Y-%m-%d %H:%M")
+            fields.append(label(f"{caption} · {self.size(info.st_size)} · {modified}",
+                                "mc-transfer-caption"))
+            value = label(str(path), "mc-transfer-value")
+            value.set_tooltip_text(str(path))
+            fields.append(value)
+        buttons = (("_Yes", "yes"), ("_No", "no"), ("_Abort", "abort"),
+                   ("_All", "all"), ("N_one", "none"), ("Size _differs", "size_differs"),
+                   ("If _older", "older"), ("If _smaller", "smaller"))
+        first = None
+        for offset in (0, 3, 6):
+            actions = Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            actions.add_css_class("mc-dialog-actions" if offset == 0 else "mc-conflict-actions")
+            content.append(actions)
+            for text, decision in buttons[offset:offset + 3]:
+                choice = Gtk.Button(label=text, use_underline=True)
+                dialog_button(choice)
+                actions.append(choice)
+                if first is None:
+                    first = choice
+                choice.connect("clicked", lambda _button, value=decision: answer(value))
+
+        def answer(decision):
+            job.answer_conflict(conflict, decision)
+            if getattr(job, "conflict_dialog", None) is dialog:
+                job.conflict_dialog = None
+            dialog.destroy()
+
+        def closing(_dialog):
+            if not conflict.ready.is_set():
+                job.answer_conflict(conflict, "abort")
+            if getattr(job, "conflict_dialog", None) is dialog:
+                job.conflict_dialog = None
+            return False
+
+        dialog.connect("close-request", closing)
+        connect_key(dialog, lambda _widget, event: (answer("abort"), True)[1]
+                    if event.keyval == Gdk.KEY_Escape else False, capture=True)
+        dialog.set_default_widget(first)
+        dialog.present()
+        first.grab_focus()
+        return dialog
+
     def start_copy(self, sources, destination):
         return self.start_transfer(sources, destination)
 
     def start_transfer(self, sources, destination, target_name=None, operation="copy", background=True):
-        job = Transfer(sources, destination, target_name=target_name, operation=operation)
+        job = Transfer(sources, destination, target_name=target_name, operation=operation,
+                       interactive=True)
         job.background = background
         self.jobs.append(job)
         self.transfers_pool.submit(job.run)
@@ -3907,9 +4012,18 @@ class Window(Gtk.ApplicationWindow):
         return job
 
     def update_transfers(self):
-        running = [job for job in self.jobs if job.status in {"queued", "copying", "moving", "deleting"}]
+        running = [job for job in self.jobs if job.status in {"queued", "copying", "moving", "conflict", "deleting"}]
+        waiting = [job for job in running if job.status == "conflict" and job.conflict is not None]
         self.transfers_button.set_label(f"⇄ {len(running)}" if running else "⇄")
         for job in self.jobs:
+            conflict = getattr(job, "conflict", None)
+            if conflict is not None and getattr(job, "background", False) and not conflict.alerted:
+                conflict.alerted = True
+                self.transfer_alert = True
+                display = Gdk.Display.get_default()
+                if display is not None:
+                    display.beep()
+                    GLib.timeout_add(180, lambda: (display.beep(), False)[1])
             if job.status in {"completed", "failed", "cancelled"} and not getattr(job, "announced", False):
                 job.announced = True
                 if job.status == "failed" and getattr(job, "background", True):
@@ -3939,7 +4053,7 @@ class Window(Gtk.ApplicationWindow):
                 if self.mode != "files":
                     unit = "items" if job.operation == "delete" else "files"
                     self.status.set_text(f"{job.operation.title()} {job.status}: {job.files} {unit}, {self.size(job.bytes)}" + (f" · {job.error}" if job.error else ""))
-        if self.transfer_alert:
+        if self.transfer_alert or waiting:
             self.transfers_button.set_label(f"⇄ !{len(running) or ''}")
             self.transfers_button.add_css_class("transfer-alert")
         else:
@@ -3947,7 +4061,8 @@ class Window(Gtk.ApplicationWindow):
         if running:
             progress = f"{len(running)} operation(s) · " + " · ".join(
                 f"{job.files} {'items' if job.operation == 'delete' else 'files'} / {self.size(job.bytes)}" for job in running)
-            self.transfers_button.set_tooltip_text(progress)
+            self.transfers_button.set_tooltip_text(
+                "File exists — choose an overwrite action" if waiting else progress)
             if self.mode != "files":
                 self.status.set_text(progress)
         else:
@@ -3958,13 +4073,22 @@ class Window(Gtk.ApplicationWindow):
                 unit = "items" if job.operation == "delete" else "files"
                 target = (job.sources[0] if job.operation == "delete" else
                           job.destination / (job.target_name or job.sources[0].name))
+                skipped = f" · {job.skipped} skipped" if getattr(job, "skipped", 0) else ""
                 descriptions.append(f"{job.operation.upper()} {job.status.upper()}   "
-                                    f"{job.files} {unit} · {self.size(job.bytes)}\n{target}\n{job.error}")
+                                    f"{job.files} {unit} · {self.size(job.bytes)}{skipped}\n{target}\n{job.error}")
             self.jobs_label.set_text("\n\n".join(descriptions) or "No operations yet.")
             self.cancel_transfers_button.set_sensitive(bool(running))
         return True
 
     def show_jobs(self):
+        waiting = next((job for job in self.jobs
+                        if job.status == "conflict" and job.conflict is not None), None)
+        if waiting is not None:
+            if self.transfer_popover is not None and self.transfer_popover.get_visible():
+                self.transfer_popover.popdown()
+            self.transfer_alert = False
+            self.show_conflict_dialog(waiting)
+            return
         if self.transfer_popover is None:
             self.transfer_popover = Gtk.Popover()
             self.transfer_popover.set_parent(self.transfers_button)
@@ -3977,7 +4101,7 @@ class Window(Gtk.ApplicationWindow):
             jobs_scroll.set_size_request(360, 180)
             content.pack_start(jobs_scroll, True, True, 0)
             self.cancel_transfers_button = button("Cancel running operations", lambda:
-                [job.cancel.set() for job in self.jobs if job.status in {"queued", "copying", "moving", "deleting"}])
+                [job.cancel.set() for job in self.jobs if job.status in {"queued", "copying", "moving", "conflict", "deleting"}])
             content.pack_start(self.cancel_transfers_button, False, False, 0)
             self.transfer_popover.set_child(content)
         if self.transfer_popover.get_visible():
@@ -4160,7 +4284,8 @@ class Window(Gtk.ApplicationWindow):
         if self.mode == "console":
             return_mode = (self.current_workspace_tab.workspace_output_return_mode
                            if self.current_workspace_tab is not None else self.output_return_mode)
-            self.set_mode(return_mode if return_mode != "console" else "files")
+            self.set_mode(return_mode if return_mode != "console" else "files",
+                          preserve_project_return=True)
         else:
             self.set_mode("console")
 
@@ -4169,7 +4294,7 @@ class Window(Gtk.ApplicationWindow):
         if key == "o":
             self.toggle_shell_output()
         elif key == "p":
-            self.set_mode("console" if self.mode == "project" else "project")
+            self.set_mode(self.project_previous_mode() if self.mode == "project" else "project")
         elif key == "i":
             self.set_mode("files" if self.mode == "gallery" else "gallery")
         else:
@@ -4190,13 +4315,13 @@ class Window(Gtk.ApplicationWindow):
                 or (shift and not control and key in {"insert", "kp_insert"})) and not alt:
             self.paste_terminal_clipboard(_terminal)
             return True
-        if control and shift and not alt and key == "o":
-            _terminal.feed_child(b"\x0f")
+        if control and shift and not alt and key in {"o", "p"}:
+            _terminal.feed_child(b"\x0f" if key == "o" else b"\x10")
             return True
-        if control and not shift and not alt and key == "o":
+        if control and not shift and not alt and key in {"o", "p"}:
             if self.terminal_has_foreground_program(_terminal):
                 return False
-            self.toggle_shell_output()
+            self.mode_shortcut(key)
             return True
         if control and not shift and not alt and key in {"1", "2", "3", "4"}:
             if self.terminal_has_foreground_program(_terminal):
@@ -4255,6 +4380,7 @@ class Window(Gtk.ApplicationWindow):
         terminal.workspace_pending = []
         terminal.workspace_mode = "console"
         terminal.workspace_output_return_mode = "files"
+        terminal.workspace_project_return_mode = "files"
         terminal.workspace_browser = (self.capture_browser_state()
                                       if self.current_workspace_tab is None
                                       or self.browser_state_tab is self.current_workspace_tab
@@ -4603,7 +4729,7 @@ class Window(Gtk.ApplicationWindow):
 
     def quit(self, confirmed=False, on_cancel=None):
         active_terminals = any(pid for _terminal, pid in self.terminals)
-        active_jobs = any(j.status in {"queued", "copying", "moving", "deleting"} for j in self.jobs)
+        active_jobs = any(j.status in {"queued", "copying", "moving", "conflict", "deleting"} for j in self.jobs)
         if (active_terminals or active_jobs) and not confirmed:
             question = ("Quit Nightty and close its terminals?" if active_terminals
                         else "Quit Nightty and cancel unfinished file operations?")
@@ -4633,14 +4759,16 @@ class Window(Gtk.ApplicationWindow):
         if self.top_tab_shortcut(key, event.state):
             return True
         if terminal_focus and not (
-                ctrl and (not shift and key.lower() in {"o", "q", "1", "2", "3", "4"}
-                          or shift and key.lower() in {"o", "t", "c", "v"})
+                ctrl and (not shift and key.lower() in {"o", "p", "q", "1", "2", "3", "4"}
+                          or shift and key.lower() in {"o", "p", "t", "c", "v"})
                 or key == "F12"):
             return False
-        if terminal_focus and ctrl and shift and key.lower() == "o":
-            self.current_workspace_tab.feed_child(b"\x0f")
+        if terminal_focus and ctrl and shift and key.lower() in {"o", "p"}:
+            self.current_workspace_tab.feed_child(
+                b"\x0f" if key.lower() == "o" else b"\x10")
             return True
-        if (terminal_focus and ctrl and not shift and key.lower() in {"o", "1", "2", "3", "4"}
+        if ((terminal_focus or self.mode == "console") and ctrl and not shift
+                and key.lower() in {"o", "p", "1", "2", "3", "4"}
                 and self.terminal_has_foreground_program(self.current_workspace_tab)):
             return False
         if ctrl and key in {"1", "2", "3", "4"}:

@@ -12,6 +12,7 @@ import stat
 import tempfile
 import threading
 import time
+import uuid
 
 
 def atomic_json(path, value):
@@ -194,6 +195,17 @@ def rename_noreplace(source, target):
 
 
 @dataclass
+class TransferConflict:
+    source: Path
+    target: Path
+    source_stat: os.stat_result
+    target_stat: os.stat_result
+    decision: str | None = None
+    alerted: bool = False
+    ready: threading.Event = field(default_factory=threading.Event, repr=False)
+
+
+@dataclass
 class Transfer:
     sources: list[Path]
     destination: Path
@@ -205,6 +217,58 @@ class Transfer:
     target_name: str | None = None
     operation: str = "copy"
     method: str = ""
+    interactive: bool = False
+    overwrite_policy: str = "ask"
+    skipped: int = 0
+    conflict: TransferConflict | None = field(default=None, init=False, repr=False)
+
+    def answer_conflict(self, conflict, decision):
+        if conflict is not self.conflict or conflict.ready.is_set():
+            return False
+        if decision not in {"yes", "no", "all", "none", "older", "smaller", "size_differs", "abort"}:
+            raise ValueError(f"Unknown overwrite choice: {decision}")
+        conflict.decision = decision
+        conflict.ready.set()
+        return True
+
+    def _overwrite(self, source, target):
+        if not target.exists() and not target.is_symlink():
+            return False
+        source_stat, target_stat = source.lstat(), target.lstat()
+        if stat.S_ISDIR(source_stat.st_mode) or stat.S_ISDIR(target_stat.st_mode):
+            raise ValueError(f"Cannot replace a directory with a file, or a file with a directory: {target}")
+        if not (stat.S_ISREG(target_stat.st_mode) or stat.S_ISLNK(target_stat.st_mode)):
+            raise ValueError(f"Cannot replace a special file: {target}")
+        if not self.interactive:
+            raise FileExistsError(f"Already exists: {target}")
+        choice = self.overwrite_policy
+        if choice == "ask":
+            conflict = TransferConflict(source, target, source_stat, target_stat)
+            self.conflict = conflict
+            self.status = "conflict"
+            try:
+                while not conflict.ready.wait(0.1):
+                    if self.cancel.is_set():
+                        raise Cancelled()
+                choice = conflict.decision
+            finally:
+                self.conflict = None
+                self.status = "moving" if self.operation == "move" else "copying"
+            if choice in {"all", "none", "older", "smaller", "size_differs"}:
+                self.overwrite_policy = choice
+        if self.cancel.is_set() or choice == "abort":
+            raise Cancelled()
+        if choice in {"yes", "all"}:
+            return True
+        if choice in {"no", "none"}:
+            return None
+        if choice == "older":
+            return True if source_stat.st_mtime_ns > target_stat.st_mtime_ns else None
+        if choice == "smaller":
+            return True if source_stat.st_size < target_stat.st_size else None
+        if choice == "size_differs":
+            return True if source_stat.st_size != target_stat.st_size else None
+        raise ValueError(f"Unknown overwrite choice: {choice}")
 
     def run(self):
         self.status = "moving" if self.operation == "move" else "copying"
@@ -228,9 +292,10 @@ class Transfer:
                 if target in planned_targets:
                     raise ValueError(f"Multiple sources have the same destination name: {target.name}")
                 planned_targets.add(target)
-                if target.exists() or target.is_symlink():
+                if not self.interactive and (target.exists() or target.is_symlink()):
                     raise FileExistsError(f"Already exists: {target.name}")
-                if source.is_dir() and not source.is_symlink() and self.destination.is_relative_to(source.resolve()):
+                if (source.is_dir() and not source.is_symlink() and
+                        (self.destination.is_relative_to(source.resolve()) or source == target)):
                     raise ValueError("cannot transfer a directory inside itself")
             for source in self.sources:
                 source = Path(source)
@@ -249,38 +314,96 @@ class Transfer:
         return self
 
     def _move(self, source, target):
+        if source == target:
+            raise ValueError(f"Source and destination are the same: {source}")
+        info = source.lstat()
+        target_exists = target.exists() or target.is_symlink()
+        if stat.S_ISDIR(info.st_mode) and target_exists and target.is_dir() and not target.is_symlink():
+            complete = True
+            with os.scandir(source) as entries:
+                children = [Path(entry.path) for entry in entries]
+            for child in children:
+                if self.cancel.is_set():
+                    raise Cancelled()
+                if not self._move(child, target / child.name):
+                    complete = False
+            if complete:
+                source.rmdir()
+            self.method = "merge"
+            return complete
+        replace = self._overwrite(source, target) if target_exists else False
+        if replace is None:
+            self.skipped += 1
+            return False
         # A rename is instantaneous on one filesystem; EXDEV covers mount edges.
-        if source.lstat().st_dev == self.destination.stat().st_dev:
+        if info.st_dev == self.destination.stat().st_dev:
             try:
-                rename_noreplace(source, target)
+                if replace:
+                    os.replace(source, target)
+                else:
+                    rename_noreplace(source, target)
                 self.method = "rename"
                 self.files += 1
-                return
+                return True
             except OSError as exc:
                 if exc.errno != errno.EXDEV:
                     raise
         self.method = "copy and remove"
-        self._copy(source, target)
+        if stat.S_ISDIR(info.st_mode):
+            target.mkdir()
+            complete = True
+            with os.scandir(source) as entries:
+                children = [Path(entry.path) for entry in entries]
+            for child in children:
+                if self.cancel.is_set():
+                    raise Cancelled()
+                if not self._move(child, target / child.name):
+                    complete = False
+            if complete:
+                source.rmdir()
+            return complete
+        complete = self._copy(source, target, replace=replace)
         if self.cancel.is_set():
             raise Cancelled()
-        if source.is_dir() and not source.is_symlink():
-            shutil.rmtree(source)
-        else:
+        if complete:
             source.unlink()
+        return complete
 
-    def _copy(self, source, target):
+    def _copy(self, source, target, replace=None):
         if self.cancel.is_set():
             raise Cancelled()
         info = source.lstat()
-        if stat.S_ISLNK(info.st_mode):
-            target.symlink_to(os.readlink(source))
-            self.files += 1
-        elif stat.S_ISDIR(info.st_mode):
-            target.mkdir()  # refuses a concurrent destination; no merges
+        if stat.S_ISDIR(info.st_mode):
+            exists = target.exists() or target.is_symlink()
+            if exists and (target.is_symlink() or not target.is_dir()):
+                raise ValueError(f"Cannot merge a directory into a file: {target}")
+            if not exists:
+                target.mkdir()  # refuses a concurrent destination
+            complete = True
             with os.scandir(source) as entries:
                 for entry in entries:
-                    self._copy(Path(entry.path), target / entry.name)
-            shutil.copystat(source, target, follow_symlinks=False)
+                    if not self._copy(Path(entry.path), target / entry.name):
+                        complete = False
+            if not exists:
+                shutil.copystat(source, target, follow_symlinks=False)
+            return complete
+        if replace is None:
+            replace = self._overwrite(source, target)
+        if replace is None:
+            self.skipped += 1
+            return False
+        if stat.S_ISLNK(info.st_mode):
+            link = os.readlink(source)
+            if replace:
+                temporary = target.parent / f".surface-copy-{uuid.uuid4().hex}"
+                try:
+                    temporary.symlink_to(link)
+                    os.replace(temporary, target)
+                finally:
+                    temporary.unlink(missing_ok=True)
+            else:
+                target.symlink_to(link)
+            self.files += 1
         elif stat.S_ISREG(info.st_mode):
             handle, temporary = tempfile.mkstemp(prefix=".surface-copy-", dir=target.parent)
             try:
@@ -301,8 +424,11 @@ class Transfer:
                     output.flush()
                     os.fsync(output.fileno())
                 shutil.copystat(source, temporary, follow_symlinks=False)
-                # Atomic no-clobber publication on this destination filesystem.
-                os.link(temporary, target)
+                # Keep publication atomic, including an approved replacement.
+                if replace:
+                    os.replace(temporary, target)
+                else:
+                    os.link(temporary, target)
                 self.files += 1
             finally:
                 if handle is not None:
@@ -310,6 +436,7 @@ class Transfer:
                 Path(temporary).unlink(missing_ok=True)
         else:
             raise ValueError(f"Special file is not copied: {source.name}")
+        return True
 
 
 @dataclass

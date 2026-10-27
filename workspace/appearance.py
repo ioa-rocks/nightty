@@ -14,7 +14,8 @@ PALETTE_KEYS = {
     "image", "video", "audio", "document", "source", "data", "archive",
     "symlink", "executable",
 }
-OPTIONAL_PALETTE_KEYS = {"terminal_foreground", "terminal_background", "marked"}
+OPTIONAL_PALETTE_KEYS = {"terminal_foreground", "terminal_background", "marked",
+                         "dialog_background"}
 FONT_SIZES = {"ui_px", "files_px", "small_px", "heading_px"}
 HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 FONT_FAMILY = re.compile(r"[a-zA-Z0-9 _-]{1,64}\Z")
@@ -38,23 +39,26 @@ button.pane-header-control:focus { background:$surface; color:$foreground; }
 button.pane-address-control { min-width:28px; min-height:28px; margin:2px; }
 entry.pane-address-entry { padding-left:36px; padding-right:36px; border-radius:4px; }
 .pane-menu-item { min-width:260px; padding:6px 12px; }
-window.mc-dialog { background:$surface; color:$foreground; border:2px solid $accent; border-radius:0; box-shadow:none; font-family:'$family'; }
-.mc-dialog-content { background:$surface; }
-.mc-dialog-title { background:$surface; color:$accent; border-bottom:1px solid $border; padding:12px 26px; font-size:${dialog_title_px}px; font-weight:700; }
+window.mc-dialog { background:$dialog_background; color:$foreground; border:3px solid $accent; border-radius:0; box-shadow:none; font-family:'$family'; }
+.mc-dialog-content { background:$dialog_background; }
+.mc-dialog-title { background:$accent; color:$accent_text; border-bottom:2px solid $border; padding:12px 26px; font-size:${dialog_title_px}px; font-weight:700; }
 .mc-dialog-message { color:$foreground; padding:24px 26px 12px; font-size:${dialog_message_px}px; }
 .mc-dialog-detail { color:$muted; padding:0 26px 20px; font-size:${dialog_detail_px}px; }
-.mc-dialog-actions { padding:14px 26px 24px; border-top:1px solid $border; }
-window.mc-dialog button.mc-dialog-button { background:$background; background-image:none; color:$foreground; border:2px solid $border; border-radius:2px; box-shadow:none; min-width:150px; min-height:52px; padding:8px 16px; font-family:'$family'; font-size:${dialog_button_px}px; font-weight:700; }
-window.mc-dialog button.mc-dialog-default { background:$accent; color:$accent_text; border-color:$accent; }
-window.mc-dialog button.mc-dialog-button:focus { border-color:$accent; }
+.mc-dialog-actions { padding:14px 26px 24px; border-top:1px solid $accent; }
+.mc-conflict-actions { padding:0 26px 12px; }
+.mc-conflict-actions:last-child { padding-bottom:24px; }
+window.mc-dialog button.mc-dialog-button { background:$surface; background-image:none; color:$foreground; border:2px solid $border; border-radius:2px; box-shadow:none; min-width:150px; min-height:52px; padding:8px 16px; font-family:'$family'; font-size:${dialog_button_px}px; font-weight:700; }
 window.mc-dialog button.mc-dialog-button:hover { border-color:$foreground; }
+window.mc-dialog button.mc-dialog-button.mc-dialog-focused,
+window.mc-dialog button.mc-dialog-button:focus { background:$accent; color:$accent_text; border-color:$accent_text; }
 window.mc-dialog.mc-danger-dialog { border-color:#d94e44; }
-window.mc-danger-dialog .mc-dialog-title { color:#ff8378; border-bottom-color:#a83f32; }
+window.mc-danger-dialog .mc-dialog-title { background:#a83f32; color:#ffffff; border-bottom-color:#d94e44; }
 window.mc-danger-dialog .mc-dialog-message { color:#ffbbb3; }
-window.mc-danger-dialog button.mc-danger-default { background:#a83f32; color:#ffffff; border-color:#e36b58; }
-window.mc-danger-dialog button.mc-danger-default:focus { border-color:#ffc2bb; }
+window.mc-danger-dialog button.mc-danger-default { color:#ffbbb3; border-color:#e36b58; }
+window.mc-danger-dialog button.mc-danger-default.mc-dialog-focused,
+window.mc-danger-dialog button.mc-danger-default:focus { background:#a83f32; color:#ffffff; border-color:#ffc2bb; }
 .mc-transfer-fields { padding:20px 26px 12px; }
-.mc-transfer-caption { color:$muted; font-size:${dialog_detail_px}px; font-weight:700; }
+.mc-transfer-caption { color:$foreground; font-size:${dialog_detail_px}px; font-weight:700; }
 .mc-transfer-value { color:$foreground; font-size:${dialog_message_px}px; padding-bottom:12px; }
 entry.mc-transfer-entry { min-height:40px; font-size:${dialog_message_px}px; padding:4px 8px; }
 dropdown.mc-find-scope { min-height:42px; font-size:${dialog_message_px}px; }
@@ -132,4 +136,6 @@ def stylesheet(appearance):
                     "dialog_message_px": fonts["ui_px"] + 4,
                     "dialog_detail_px": fonts["ui_px"] + 2,
                     "dialog_button_px": fonts["ui_px"] + 4}
-    return CSS.substitute({"marked": "#b58900"} | appearance["palette"] | fonts | dialog_sizes).encode()
+    palette = {"marked": "#b58900",
+               "dialog_background": appearance["palette"].get("dialog_background", appearance["palette"]["background"])}
+    return CSS.substitute(palette | appearance["palette"] | fonts | dialog_sizes).encode()
