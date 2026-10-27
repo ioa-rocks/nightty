@@ -51,8 +51,11 @@ window.mc-danger-dialog button.mc-danger-default:focus { border-color:#ffc2bb; }
 .mc-transfer-caption { color:$muted; font-size:${dialog_detail_px}px; font-weight:700; }
 .mc-transfer-value { color:$foreground; font-size:${dialog_message_px}px; padding-bottom:12px; }
 entry.mc-transfer-entry { min-height:40px; font-size:${dialog_message_px}px; padding:4px 8px; }
+dropdown.mc-find-scope { min-height:42px; font-size:${dialog_message_px}px; }
 .mc-transfer-error { color:#e36b58; font-size:${dialog_detail_px}px; padding:0 26px 16px; }
 .mc-transfer-progress { margin:4px 26px 20px; min-height:12px; }
+.search-results-bar { background:$surface; border-bottom:1px solid $border; }
+.search-results-label { color:$accent; font-size:${small_px}px; font-weight:700; }
 entry { background:$surface; color:$foreground; border:1px solid $border; border-radius:0; font-family:'$family'; font-size:${files_px}px; }
 treeview { background:$background; color:$foreground; font-family:'$family'; font-size:${files_px}px; outline-width:0; }
 treeview:selected { background:$accent; color:$accent_text; outline-width:0; }

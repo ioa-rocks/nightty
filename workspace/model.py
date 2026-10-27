@@ -187,10 +187,14 @@ class Transfer:
                 if len(self.sources) != 1 or self.target_name in {"", ".", ".."} or Path(self.target_name).name != self.target_name:
                     raise ValueError("a target name requires exactly one source and no path separators")
             # Validate every top-level destination before starting the batch.
+            planned_targets = set()
             for source in self.sources:
                 source = Path(source)
                 source.lstat()
                 target = self.destination / (self.target_name or source.name)
+                if target in planned_targets:
+                    raise ValueError(f"Multiple sources have the same destination name: {target.name}")
+                planned_targets.add(target)
                 if target.exists() or target.is_symlink():
                     raise FileExistsError(f"Already exists: {target.name}")
                 if source.is_dir() and not source.is_symlink() and self.destination.is_relative_to(source.resolve()):

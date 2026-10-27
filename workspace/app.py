@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 from urllib.parse import urlsplit
 import uuid
 
@@ -30,6 +31,7 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, Vte
 from .agents import Agents
 from .appearance import load_appearance, stylesheet
 from .model import Deletion, State, Transfer, context_for, directory_entries
+from .search import SearchCancelled, find_names
 
 
 class Box(Gtk.Box):
@@ -312,6 +314,10 @@ class Pane(Box):
         search_button.set_tooltip_text("Search names in this folder (Alt+S)")
         search_button.connect("clicked", lambda *_: self.show_search())
         toolbar.pack_start(search_button, False, False, 0)
+        find_button = Gtk.Button(label="Find")
+        find_button.set_tooltip_text("Find files in this tree or the plocate index (Alt+F7)")
+        find_button.connect("clicked", lambda *_: self.window.show_find_dialog(self))
+        toolbar.pack_start(find_button, False, False, 0)
         self.pack_start(toolbar, False, False, 0)
         self.search_row = Box(spacing=6, margin=7)
         self.search = Gtk.SearchEntry()
@@ -324,8 +330,25 @@ class Pane(Box):
         self.search_row.pack_start(self.search_result, False, False, 0)
         self.search_row.pack_start(button("×", self.hide_search), False, False, 0)
         self.pack_start(self.search_row, False, False, 0)
+        self.results_active = False
+        self.results_serial = 0
+        self.results_cancel = None
+        self.results_query = ""
+        self.results_scope = "tree"
+        self.results_matches = []
+        self.results_saved_marks = set()
+        self.results_restore_name = None
+        self.results_row = Box(spacing=8, margin=7)
+        self.results_row.add_css_class("search-results-bar")
+        self.results_label = label("", "search-results-label")
+        self.results_row.pack_start(self.results_label, True, True, 0)
+        self.results_row.pack_end(button("Close  Esc", self.close_results), False, False, 0)
+        self.results_row.pack_end(button("Refresh", lambda: self.window.repeat_find(self, reveal=True)), False, False, 0)
+        self.pack_start(self.results_row, False, False, 0)
+        self.results_row.hide()
         self.store = Gtk.ListStore(str, str, str, str, str)
         self.view = Gtk.IconView(model=self.store)
+        self.view.set_tooltip_column(3)
         self.view.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
         self.view.set_columns(2)
         self.view.set_item_width(300)
@@ -429,6 +452,8 @@ class Pane(Box):
         self.search_row.hide()
 
     def navigate(self, path, selected_name=None):
+        if self.results_active:
+            self.leave_results()
         if self.search_row.get_visible():
             self.hide_search()
         path = Path(path).expanduser()
@@ -575,12 +600,109 @@ class Pane(Box):
             self.pending_restore_name = None
 
     def up(self):
-        self.navigate(self.path.parent)
+        if self.results_active:
+            self.close_results()
+        else:
+            self.navigate(self.path.parent)
 
     def refresh(self):
+        if self.results_active:
+            self.window.repeat_find(self)
+            return
         current = self.cursor_logical()
         name = self.entries[current][1] if current is not None else None
         self.navigate(self.path, selected_name=name)
+
+    def begin_results(self, query, scope, preserve_marks=False, focus=True):
+        if not self.results_active:
+            current = self.cursor_logical()
+            self.results_restore_name = (self.entries[current][1]
+                                         if current is not None and current < len(self.entries) else None)
+            self.results_saved_marks = self.marked_paths.copy()
+        elif self.results_cancel is not None:
+            self.results_cancel.set()
+        self.results_serial += 1
+        self.results_cancel = threading.Event()
+        self.results_active = True
+        self.results_query, self.results_scope = query, scope
+        self.results_matches = []
+        if not preserve_marks:
+            self.marked_paths.clear()
+        self.generation += 1  # Discard any unfinished directory listing.
+        self.stop_model_fill()
+        if self.scan_flush_source:
+            GLib.source_remove(self.scan_flush_source)
+            self.scan_flush_source = 0
+        if self.placeholder_source:
+            GLib.source_remove(self.placeholder_source)
+            self.placeholder_source = 0
+        if self.search_row.get_visible():
+            self.search_row.hide()
+            self.search.set_text("")
+        self.pending_restore_name = None
+        self.results_row.show()
+        self.show_result_rows(loading=True)
+        if focus:
+            self.view.grab_focus()
+        return self.results_serial, self.results_cancel
+
+    def leave_results(self):
+        if self.results_cancel is not None:
+            self.results_cancel.set()
+        self.results_serial += 1
+        self.results_active = False
+        self.results_row.hide()
+        self.results_matches = []
+        self.marked_paths = self.results_saved_marks
+
+    def close_results(self):
+        if not self.results_active:
+            return
+        restore_name = self.results_restore_name
+        self.leave_results()
+        self.navigate(self.path, selected_name=restore_name)
+        self.view.grab_focus()
+
+    def show_result_rows(self, loading=False, outcome=None, error=None):
+        old_entries = self.entries
+        current = self.current_path() if old_entries else None
+        entries = []
+        directories = set()
+        sizes = {}
+        for match in self.results_matches:
+            path = str(match.path)
+            name = match.path.name
+            prefix = "@" if match.symlink else "/" if match.directory else "*" if match.executable else ""
+            entries.append([prefix + name, name,
+                            "" if match.directory else self.window.size(match.size), path,
+                            self.window.file_color(name, match.directory, match.symlink, match.executable)])
+            if match.directory:
+                directories.add(path)
+            else:
+                sizes[path] = match.size
+        self.entries = entries
+        self.directory_paths = directories
+        self.entry_sizes = sizes
+        if not loading:
+            self.marked_paths.intersection_update(row[3] for row in entries)
+        count = len(entries)
+        if error:
+            summary = f"Search failed: {error}"
+        elif loading:
+            summary = f"{count} found · searching…"
+        else:
+            summary = f"{count} found" + (" · limit reached" if outcome and outcome.truncated else "")
+            if outcome and outcome.skipped:
+                summary += f" · {outcome.skipped} inaccessible"
+        self.count.set_text(summary)
+        scope_label = "this tree" if self.results_scope == "tree" else "indexed files"
+        self.results_label.set_text(f"FIND  {self.results_query}  ·  {scope_label}  ·  {summary}")
+        self.rebuild_entries(preserve=bool(old_entries and current is not None and
+                                           str(current) in {row[3] for row in entries}))
+        if self is self.window.active and self.window.mode in {"files", "gallery"}:
+            selected = self.selected_paths()
+            self.window.selection = selected[0] if selected else None
+        self.window.refresh_file_footer(self)
 
     def favourite(self):
         self.window.state.toggle_favourite(self.path)
@@ -1152,6 +1274,14 @@ class Pane(Box):
         return self.geometry_attempts < 80
 
     def name_color(self, _column, renderer, model, row, *_data):
+        if self.results_active and model[row][3]:
+            parent = Path(model[row][3]).parent
+            if self.results_scope == "tree":
+                try:
+                    parent = parent.relative_to(self.path)
+                except ValueError:
+                    pass
+            renderer.set_property("text", f"{model[row][1]}  ·  {parent}")
         selected = self.view.path_is_selected(model.get_path(row))
         marked = model[row][3] in self.marked_paths
         if not model[row][3]:
@@ -2842,11 +2972,133 @@ class Window(Gtk.ApplicationWindow):
         self.inspector_target = None
 
     def open_external(self, path=None):
+        if (path is None and self.mode == "files" and self.active.results_active
+                and not self.active.selected_paths()):
+            return
         path = Path(path or (self.inspector_target if self.mode == "inspect" else self.selection or self.active.path))
         try:
             Gio.AppInfo.launch_default_for_uri(path.as_uri(), None)
         except GLib.Error as exc:
             self.status.set_text(f"Cannot open {path.name}: {exc}")
+
+    def show_find_dialog(self, pane=None):
+        pane = pane or self.active
+        dialog = Gtk.Window(transient_for=self, modal=True)
+        dialog.set_title("Find files")
+        dialog.set_decorated(False)
+        dialog.set_resizable(False)
+        dialog.add_css_class("mc-dialog")
+        content = Box(orientation=Gtk.Orientation.VERTICAL)
+        content.add_css_class("mc-dialog-content")
+        content.set_size_request(640, -1)
+        dialog.set_child(content)
+        content.append(label("FIND FILES", "mc-dialog-title"))
+        fields = Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        fields.add_css_class("mc-transfer-fields")
+        content.append(fields)
+        fields.append(label("Filename contains", "mc-transfer-caption"))
+        query_entry = Gtk.Entry()
+        query_entry.add_css_class("mc-transfer-entry")
+        query_entry.set_text(pane.results_query if pane.results_active else "")
+        fields.append(query_entry)
+        fields.append(label("Search in", "mc-transfer-caption"))
+        scope = Gtk.DropDown.new_from_strings(["Current tree (live)", "All indexed files (plocate)"])
+        scope.add_css_class("mc-find-scope")
+        scope.set_selected(1 if pane.results_active and pane.results_scope == "indexed"
+                           else 1 if self.state.data.get("find_scope") == "indexed" else 0)
+        fields.append(scope)
+        location = label(str(pane.path), "mc-dialog-detail")
+        content.append(location)
+        error = label("", "mc-transfer-error")
+        error.set_visible(False)
+        content.append(error)
+        actions = Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        actions.add_css_class("mc-dialog-actions")
+        content.append(actions)
+        find = Gtk.Button(label="_Find", use_underline=True)
+        cancel = Gtk.Button(label="_Cancel", use_underline=True)
+        for choice in (find, cancel):
+            choice.add_css_class("mc-dialog-button")
+            choice.set_hexpand(True)
+            actions.append(choice)
+        find.add_css_class("mc-dialog-default")
+        dialog.set_default_widget(find)
+
+        def begin():
+            query = query_entry.get_text().strip()
+            if not query:
+                error.set_text("Enter a filename to find.")
+                error.set_visible(True)
+                query_entry.grab_focus()
+                return
+            chosen = "indexed" if scope.get_selected() == 1 else "tree"
+            self.state.save(find_scope=chosen)
+            dialog.destroy()
+            self.start_find(pane, query, chosen)
+
+        find.connect("clicked", lambda *_: begin())
+        cancel.connect("clicked", lambda *_: dialog.destroy())
+        query_entry.connect("activate", lambda *_: begin())
+        connect_key(dialog, lambda _widget, event: (dialog.destroy(), True)[1]
+                    if event.keyval == Gdk.KEY_Escape else False, capture=True)
+        dialog.present()
+        query_entry.grab_focus()
+        query_entry.select_region(0, -1)
+        return dialog
+
+    def repeat_find(self, pane, reveal=False):
+        if pane.results_active:
+            self.start_find(pane, pane.results_query, pane.results_scope,
+                            preserve_marks=True, reveal=reveal)
+
+    def start_find(self, pane, query, scope="tree", preserve_marks=False, reveal=True):
+        if reveal:
+            if pane is not self.active:
+                self.activate_pane(pane)
+            if self.mode != "files":
+                self.set_mode("files")
+        serial, cancellation = pane.begin_results(query, scope, preserve_marks, focus=reveal)
+        batches = queue.SimpleQueue()
+        search_finished = False
+
+        def drain():
+            if search_finished or serial != pane.results_serial or not pane.results_active:
+                return False
+            changed = False
+            while True:
+                try:
+                    pane.results_matches.extend(batches.get_nowait())
+                    changed = True
+                except queue.Empty:
+                    break
+            if changed:
+                pane.show_result_rows(loading=True)
+            return True
+
+        GLib.timeout_add(120, drain)
+
+        def finish(outcome):
+            nonlocal search_finished
+            if serial != pane.results_serial or not pane.results_active:
+                return
+            drain()
+            search_finished = True
+            pane.results_matches.sort(key=lambda match: (match.path.name.casefold(),
+                                                         str(match.path.parent).casefold()))
+            pane.show_result_rows(outcome=outcome)
+
+        def failed(exc):
+            nonlocal search_finished
+            if serial != pane.results_serial or not pane.results_active:
+                return
+            drain()
+            search_finished = True
+            if not isinstance(exc, SearchCancelled):
+                pane.show_result_rows(error=str(exc))
+
+        self.async_call(lambda: find_names(query, pane.path, scope, pane.hidden, batches.put,
+                                           cancellation.is_set), finish, failed,
+                        executor=self.listing_pool)
 
     def create_directory(self):
         pane = self.active
@@ -3332,6 +3584,14 @@ class Window(Gtk.ApplicationWindow):
                         display.beep()
                         GLib.timeout_add(180, lambda: (display.beep(), False)[1])
                 for pane in self.panes:
+                    if pane.results_active:
+                        changed_tree = (any(Path(source).is_relative_to(pane.path)
+                                            for source in job.sources)
+                                        or (job.destination is not None and
+                                            Path(job.destination).is_relative_to(pane.path)))
+                        if pane.results_scope == "indexed" or changed_tree:
+                            self.repeat_find(pane)
+                        continue
                     refresh_paths = [job.destination] if job.destination is not None else []
                     if job.operation in {"move", "delete"}:
                         refresh_paths.extend(Path(source).parent for source in job.sources)
@@ -4056,6 +4316,8 @@ class Window(Gtk.ApplicationWindow):
             self.show_locations(self.panes[0 if key in {"1", "F1"} else 1])
         elif alt and key.lower() == "s":
             self.active.show_search()
+        elif (alt and key == "F7" or ctrl and shift and key.lower() == "f") and self.mode in {"files", "gallery"}:
+            self.show_find_dialog()
         elif ctrl and shift and key.lower() == "t":
             self.new_terminal()
         elif terminal_focus and ctrl and shift and key.lower() in {"c", "v"}:
@@ -4073,6 +4335,8 @@ class Window(Gtk.ApplicationWindow):
             self.close_inspector()
         elif key == "Escape" and self.mode == "files" and self.active.search_row.get_visible():
             self.active.hide_search()
+        elif key == "Escape" and self.mode == "files" and self.active.results_active:
+            self.active.close_results()
         elif terminal_focus:
             return False
         elif ctrl and key.lower() == "l":

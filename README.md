@@ -1,9 +1,9 @@
 # Nightty — native Surface prototype
 
-A keyboard-first graphical workspace for people who live in Midnight Commander
-and command-line tools. This is a new independent Surface component, with the
-Aethera workspace vision as orientation and Second Brain as an optional agent
-backend. The existing browser AgentConsole remains independent.
+A keyboard-first terminal workspace with a commander inside it, plus Gallery,
+project context and optional agents. This is a new independent Surface component,
+with the Aethera workspace vision as orientation and Second Brain as an
+optional agent backend. The existing browser AgentConsole remains independent.
 
 ## First slice
 
@@ -37,7 +37,7 @@ backend. The existing browser AgentConsole remains independent.
   Going to a parent selects the
   directory just left. Large folders render their first screen before later rows;
   slow directory scans show partial results while the rest arrive.
-  Quick navigation and explicit background copying remain available without
+  Quick navigation, filename search and file operations remain available without
   replacing existing destinations.
 - Ctrl+I switches the active pane between Files and Gallery; the other pane
   keeps its own view. Tab changes the active pane without changing either view.
@@ -184,6 +184,22 @@ dialog counts items as they are removed and offers Abort. Symbolic links are
 removed without following them. Aborting or encountering an error can leave a
 directory partially deleted, and the operation panel records the result.
 
+## Finding files
+
+Alt+F7 or Ctrl+Shift+F opens Find Files; the Find button beside each pane's path
+does the same. **Current tree (live)** walks the active folder and finds new files
+immediately without following directory symlinks. **All indexed files
+(plocate)** searches the system index by filename; its freshness depends on
+`updatedb`. Results stream into the active file pane and stop at 5,000 matches,
+with a limit notice when a query needs narrowing. Hidden entries are included
+in the live search when the pane's hidden-file setting is enabled.
+
+The result pane keeps the usual keyboard navigation and marks. F3 previews a
+result, F4 opens it in its default application, and F5/F6/F8 act on selected or
+marked result paths. Enter opens a selected directory. Refresh runs the same
+search again; Escape or Close returns to the original folder. This search finds
+**filenames**; searching file contents and an embedded F4 editor are later work.
+
 ## Controls
 
 - Ctrl+PageUp / Ctrl+PageDown: move between workspace tabs; Ctrl+Shift+T: new
@@ -203,7 +219,7 @@ directory partially deleted, and the operation panel records the result.
 - Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 select Files / Project / Shell / Gallery
   from native views or an idle shell. Foreground terminal programs receive
   their own keys.
-- Escape closes an expanded single-file preview or inline search; it leaves
+- Escape closes an expanded single-file preview, inline search, or find results; it leaves
   Gallery, Files and Project open. F12 hides the window.
 - Type in a Files or Gallery pane to use the command line; Enter runs the command
   and opens its output, while `cd`, `cd ..`, `cd -`, and `cd /path` change the
@@ -216,6 +232,8 @@ directory partially deleted, and the operation panel records the result.
   (GNOME normally reserves Alt+F2 for Run Command)
 - Alt+S or the small magnifier beside a path: inline filename search in the
   active pane; Escape closes it. The GTK floating type-ahead box is disabled.
+- Alt+F7 / Ctrl+Shift+F or the Find button: search the current tree live or
+  search indexed filenames everywhere through plocate
 - Tab / Shift+Tab: switch browser panes and keep keyboard focus in the selected
   pane; Enter: enter a directory or open a file with GNOME's
   default application; F3: embedded preview; Home / End: first / last item
@@ -236,7 +254,7 @@ directory partially deleted, and the operation panel records the result.
 
 `python3 -m unittest discover -s tests -v` verifies metadata inheritance,
 navigation state, copy and move cancellation/no-clobber, deletion abort and
-symlink handling, and the loopback-only agent client.
+symlink handling, live and indexed filename search, and the loopback-only agent client.
 `./run.sh --smoke --state /tmp/workspace-smoke-state`
 uses disposable files and fake agents, exercises native navigation, preview,
 copying and terminal output, and saves screenshots under `/tmp/`.

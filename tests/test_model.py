@@ -119,6 +119,23 @@ class WorkspaceTests(unittest.TestCase):
         self.assertFalse((destination / "a").exists())
         self.assertEqual((destination / "b").read_text(), "keep")
 
+    def test_batch_preflight_rejects_duplicate_names_from_different_folders(self):
+        first = self.root / "first"
+        second = self.root / "second"
+        destination = self.root / "dest"
+        for folder in (first, second, destination):
+            folder.mkdir()
+        (first / "same.txt").write_text("first")
+        (second / "same.txt").write_text("second")
+        for operation in ("copy", "move"):
+            job = Transfer([first / "same.txt", second / "same.txt"], destination,
+                           operation=operation).run()
+            self.assertEqual(job.status, "failed")
+            self.assertIn("same destination name", job.error)
+            self.assertFalse((destination / "same.txt").exists())
+            self.assertTrue((first / "same.txt").exists())
+            self.assertTrue((second / "same.txt").exists())
+
     def test_copy_to_edited_name_and_refuse_existing_name(self):
         source = self.root / "file1"
         source.write_text("copy me")
