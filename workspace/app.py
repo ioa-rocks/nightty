@@ -22,9 +22,9 @@ from urllib.parse import urlsplit
 import uuid
 
 import gi
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
-gi.require_version("Vte", "2.91")
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+gi.require_version("Vte", "3.91")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, Vte
 
 from .agents import Agents
@@ -32,12 +32,134 @@ from .appearance import load_appearance, stylesheet
 from .model import State, Transfer, context_for, directory_entries
 
 
+class Box(Gtk.Box):
+    """Keep Nightty's start/end packing order while using GTK 4 boxes."""
+
+    def __init__(self, **kwargs):
+        margin = kwargs.pop("margin", 0)
+        super().__init__(**kwargs)
+        if margin:
+            for edge in ("start", "end", "top", "bottom"):
+                getattr(self, f"set_margin_{edge}")(margin)
+        self._start_tail = None
+
+    def _layout_child(self, child, expand, padding):
+        if self.get_orientation() == Gtk.Orientation.HORIZONTAL:
+            child.set_hexpand(expand)
+            child.set_margin_start(padding)
+            child.set_margin_end(padding)
+        else:
+            child.set_vexpand(expand)
+            child.set_margin_top(padding)
+            child.set_margin_bottom(padding)
+
+    def pack_start(self, child, expand=False, _fill=False, padding=0):
+        self._layout_child(child, expand, padding)
+        if self._start_tail is not None and self._start_tail.get_parent() is not self:
+            self._start_tail = None
+        if self._start_tail is None:
+            self.prepend(child)
+        else:
+            self.insert_child_after(child, self._start_tail)
+        self._start_tail = child
+
+    def pack_end(self, child, expand=False, _fill=False, padding=0):
+        self._layout_child(child, expand, padding)
+        if self._start_tail is not None and self._start_tail.get_parent() is not self:
+            self._start_tail = None
+        if self._start_tail is None:
+            self.prepend(child)
+        else:
+            self.insert_child_after(child, self._start_tail)
+
+    def get_children(self):
+        return widget_children(self)
+
+
+def widget_children(widget):
+    result = []
+    child = widget.get_first_child()
+    while child is not None:
+        result.append(child)
+        child = child.get_next_sibling()
+    return result
+
+
+def connect_key(widget, callback, capture=False):
+    controller = Gtk.EventControllerKey.new()
+    controller.set_propagation_phase(
+        Gtk.PropagationPhase.CAPTURE if capture else Gtk.PropagationPhase.BUBBLE)
+    controller.connect("key-pressed", lambda _controller, keyval, _keycode, state:
+                       bool(callback(widget, argparse.Namespace(keyval=keyval, state=state))))
+    widget.add_controller(controller)
+    return controller
+
+
+def connect_focus(widget, callback):
+    controller = Gtk.EventControllerFocus.new()
+    controller.connect("enter", lambda *_: callback(widget, None))
+    widget.add_controller(controller)
+    return controller
+
+
+def connect_click(widget, callback):
+    gesture = Gtk.GestureClick.new()
+    gesture.set_button(0)
+
+    def pressed(controller, _count, x, y):
+        event = argparse.Namespace(button=controller.get_current_button(),
+                                   type=Gdk.EventType.BUTTON_PRESS,
+                                   state=controller.get_current_event_state(),
+                                   x=x, y=y,
+                                   gdk_event=controller.get_current_event())
+        callback(widget, event)
+
+    gesture.connect("pressed", pressed)
+    widget.add_controller(gesture)
+    return gesture
+
+
+def on_resize(widget, callback):
+    """GTK 4 has no size-allocate signal; watch mapped frame allocations."""
+    previous = None
+
+    def tick(current, _clock):
+        nonlocal previous
+        size = (current.get_allocated_width(), current.get_allocated_height())
+        if size != previous:
+            previous = size
+            callback(current, argparse.Namespace(width=size[0], height=size[1]))
+        return True
+
+    widget.add_tick_callback(tick)
+
+
+def text_has_focus(focus):
+    return (focus is not None and
+            (isinstance(focus, (Gtk.Entry, Gtk.TextView, Vte.Terminal))
+             or focus.get_ancestor(Gtk.Entry) is not None
+             or focus.get_ancestor(Gtk.TextView) is not None))
+
+
+def drawing_overlay(widget, draw):
+    overlay = Gtk.Overlay()
+    overlay.set_child(widget)
+    area = Gtk.DrawingArea()
+    area.set_hexpand(True)
+    area.set_vexpand(True)
+    area.set_can_target(False)
+    area.set_draw_func(lambda _area, context, _width, _height: draw(area, context))
+    overlay.add_overlay(area)
+    overlay.drawing_area = area
+    return overlay
+
+
 def label(text="", css=None):
     widget = Gtk.Label(label=text, xalign=0)
     widget.set_selectable(True)
     widget.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
     if css:
-        widget.get_style_context().add_class(css)
+        widget.add_css_class(css)
     return widget
 
 
@@ -51,51 +173,56 @@ def yes_no_dialog(parent, text, secondary=None):
     dialog = Gtk.Dialog(transient_for=parent, modal=True, use_header_bar=False)
     dialog.set_decorated(False)
     dialog.set_resizable(False)
-    dialog.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
-    dialog.get_style_context().add_class("mc-dialog")
+    dialog.add_css_class("mc-dialog")
     content = dialog.get_content_area()
     content.set_spacing(0)
 
     title = Gtk.Label(label=" Confirm ")
-    title.get_style_context().add_class("mc-dialog-title")
-    content.pack_start(title, False, False, 0)
+    title.add_css_class("mc-dialog-title")
+    content.append(title)
 
     message = Gtk.Label(label=text, xalign=0)
-    message.set_line_wrap(True)
-    message.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+    message.set_wrap(True)
+    message.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
     message.set_max_width_chars(54)
-    message.get_style_context().add_class("mc-dialog-message")
-    content.pack_start(message, False, False, 0)
+    message.add_css_class("mc-dialog-message")
+    content.append(message)
     if secondary:
         detail = Gtk.Label(label=secondary, xalign=0)
-        detail.set_line_wrap(True)
-        detail.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        detail.set_wrap(True)
+        detail.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
         detail.set_max_width_chars(54)
-        detail.get_style_context().add_class("mc-dialog-detail")
-        content.pack_start(detail, False, False, 0)
+        detail.add_css_class("mc-dialog-detail")
+        content.append(detail)
 
     yes = dialog.add_button("_Yes", Gtk.ResponseType.YES)
     no = dialog.add_button("_No", Gtk.ResponseType.NO)
     for choice in (yes, no):
-        choice.get_style_context().add_class("mc-dialog-button")
-    yes.get_style_context().add_class("mc-dialog-default")
-    actions = dialog.get_action_area()
-    actions.set_layout(Gtk.ButtonBoxStyle.CENTER)
-    actions.set_spacing(12)
-    actions.set_margin_start(18)
-    actions.set_margin_end(18)
-    actions.set_margin_top(8)
-    actions.set_margin_bottom(16)
+        choice.add_css_class("mc-dialog-button")
+    yes.add_css_class("mc-dialog-default")
     dialog.set_default_response(Gtk.ResponseType.YES)
-    dialog.show_all()
-    yes.grab_focus()
+    return dialog
+
+
+def confirm(parent, text, secondary, on_yes, on_no=None):
+    dialog = yes_no_dialog(parent, text, secondary)
+
+    def answered(_dialog, response):
+        dialog.destroy()
+        if response == Gtk.ResponseType.YES:
+            on_yes()
+        elif on_no is not None:
+            on_no()
+
+    dialog.connect("response", answered)
+    dialog.present()
     return dialog
 
 
 def scrolled(widget):
     scroll = Gtk.ScrolledWindow()
     scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-    scroll.add(widget)
+    scroll.set_child(widget)
     return scroll
 
 
@@ -125,7 +252,7 @@ def pdf_pixbuf(path, edge):
     return pixbuf
 
 
-class Pane(Gtk.Box):
+class Pane(Box):
     def __init__(self, window, folder, index):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.window, self.path, self.index = window, Path(folder), index
@@ -145,7 +272,7 @@ class Pane(Gtk.Box):
         self.gallery_render_waiters = {}
         self.gallery_pending_target = None
         self.gallery_pending_top = None
-        toolbar = Gtk.Box(spacing=5, margin=7)
+        toolbar = Box(spacing=5, margin=7)
         self.locations_button = button("⌄", lambda: self.window.show_locations(self))
         self.locations_button.set_tooltip_text("Favourites and recent folders (Alt+1 / Alt+2)")
         toolbar.pack_start(self.locations_button, False, False, 0)
@@ -154,22 +281,21 @@ class Pane(Gtk.Box):
         self.location.connect("activate", lambda entry: self.navigate(Path(entry.get_text()).expanduser()))
         toolbar.pack_start(self.location, True, True, 0)
         search_button = Gtk.Button()
-        search_button.add(Gtk.Image.new_from_icon_name("edit-find-symbolic", Gtk.IconSize.MENU))
+        search_button.set_child(Gtk.Image.new_from_icon_name("edit-find-symbolic"))
         search_button.set_tooltip_text("Search names in this folder (Alt+S)")
         search_button.connect("clicked", lambda *_: self.show_search())
         toolbar.pack_start(search_button, False, False, 0)
         self.pack_start(toolbar, False, False, 0)
-        self.search_row = Gtk.Box(spacing=6, margin=7)
+        self.search_row = Box(spacing=6, margin=7)
         self.search = Gtk.SearchEntry()
         self.search.set_placeholder_text("Search filenames in this folder")
         self.search.connect("changed", self.search_changed)
         self.search.connect("activate", lambda *_: self.hide_search())
-        self.search.connect("key-press-event", self.search_key)
+        connect_key(self.search, self.search_key)
         self.search_row.pack_start(self.search, True, True, 0)
         self.search_result = label("", "muted")
         self.search_row.pack_start(self.search_result, False, False, 0)
         self.search_row.pack_start(button("×", self.hide_search), False, False, 0)
-        self.search_row.set_no_show_all(True)
         self.pack_start(self.search_row, False, False, 0)
         self.store = Gtk.ListStore(str, str, str, str, str)
         self.view = Gtk.IconView(model=self.store)
@@ -202,6 +328,7 @@ class Pane(Gtk.Box):
         self.model_pending_select = False
         self.model_pending_range = None
         self.model_selected_paths = set()
+        self.model_layout_target = None
         self.marked_paths = set()
         self.entry_sizes = {}
         self.info_cache = {}
@@ -233,33 +360,33 @@ class Pane(Gtk.Box):
         self.view.pack_start(renderer, True)
         self.view.add_attribute(renderer, "text", 1)
         self.view.set_cell_data_func(renderer, self.name_color)
-        self.view.connect("key-press-event", self.move_by_key)
-        self.view.connect("button-press-event", self.focus_nearest_on_blank)
-        self.view.connect("focus-in-event", lambda *_: self.window.activate_pane(self))
+        connect_key(self.view, self.move_by_key)
+        connect_click(self.view, self.focus_nearest_on_blank)
+        connect_focus(self.view, lambda *_: self.window.activate_pane(self))
         self.view.connect("item-activated", self.open)
         self.cursor_handler = self.view.connect("selection-changed", self.selected)
         self.scroll = scrolled(self.view)
-        self.scroll.connect("size-allocate", self.resize_columns)
+        on_resize(self.scroll, self.resize_columns)
         self.scroll.get_vadjustment().connect("value-changed", self.scroll_changed)
-        self.scroll.connect_after("draw", self.draw_column_divider)
+        self.scroll_overlay = drawing_overlay(self.scroll, self.draw_column_divider)
         self.content_stack = Gtk.Stack()
         self.content_stack.set_vhomogeneous(False)
-        self.content_stack.add_named(self.scroll, "files")
-        self.list_start = Gtk.Box()
-        self.list_start.get_style_context().add_class("pane-list-rule")
+        self.content_stack.add_named(self.scroll_overlay, "files")
+        self.list_start = Box()
+        self.list_start.add_css_class("pane-list-rule")
         self.list_start.set_size_request(-1, 2)
         self.pack_start(self.list_start, False, False, 0)
         self.pack_start(self.content_stack, True, True, 0)
-        self.list_end = Gtk.Box()
-        self.list_end.get_style_context().add_class("pane-list-rule")
+        self.list_end = Box()
+        self.list_end.add_css_class("pane-list-rule")
         self.list_end.set_size_request(-1, 2)
         self.pack_start(self.list_end, False, False, 0)
-        self.status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-        self.status_box.get_style_context().add_class("footer-box")
+        self.status_box = Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        self.status_box.add_css_class("footer-box")
         self.status = label("", "footer-details")
         self.status.set_selectable(False)
         self.status_box.pack_start(self.status, False, False, 0)
-        folder_row = Gtk.Box(spacing=12)
+        folder_row = Box(spacing=12)
         self.folder_path = label("", "footer-folder")
         self.folder_path.set_selectable(False)
         folder_row.pack_start(self.folder_path, True, True, 0)
@@ -432,13 +559,11 @@ class Pane(Gtk.Box):
     def show_search(self):
         self.window.set_mode("files")
         self.window.activate_pane(self, update=self.window.active is not self)
-        self.search_row.set_no_show_all(False)
-        self.search_row.show_all()
+        self.search_row.show()
         self.search.grab_focus()
         self.search.select_region(0, -1)
 
     def hide_search(self):
-        self.search_row.set_no_show_all(True)
         self.search_row.hide()
         self.search.set_text("")
         self.view.grab_focus()
@@ -612,7 +737,7 @@ class Pane(Gtk.Box):
         return True
 
     def move_by_key(self, _view, event):
-        if event.state & Gdk.ModifierType.MOD1_MASK:
+        if event.state & Gdk.ModifierType.ALT_MASK:
             return False
         key = Gdk.keyval_name(event.keyval)
         if ((key in {"Insert", "KP_Insert"} or
@@ -744,6 +869,8 @@ class Pane(Gtk.Box):
 
     def snap_scroll(self):
         self.scroll_snap_source = 0
+        if self.model_layout_target is not None:
+            return False
         adjustment = self.scroll.get_vadjustment()
         pitch = self.item_pitch()
         maximum = min(self.max_top() * pitch,
@@ -758,7 +885,7 @@ class Pane(Gtk.Box):
         return False
 
     def keep_cursor_visible(self):
-        if not self.entries:
+        if not self.entries or self.model_layout_target is not None:
             return
         top = self.visible_top()
         current = self.cursor_logical()
@@ -830,8 +957,8 @@ class Pane(Gtk.Box):
                 self.scroll_snap_source = 0
             self.navigation_align_serial += 1
             self.align_after_navigation = True
-            self.view.check_resize()
-            self.scroll.check_resize()
+            self.view.queue_resize()
+            self.scroll.queue_resize()
             desired_top = min(previous_top, self.max_top()) if preserve else min(
                 self.max_top(), max(0, visible_index - 2 * self.capacity + 1))
             self.scroll.get_vadjustment().set_value(desired_top * self.item_pitch())
@@ -855,6 +982,7 @@ class Pane(Gtk.Box):
             GLib.source_remove(self.model_fill_source)
             self.model_fill_source = 0
         self.staging_store = None
+        self.model_layout_target = None
 
     def append_model_page(self, staging=False):
         start = self.staging_next_start if staging else self.model_next_start
@@ -931,10 +1059,12 @@ class Pane(Gtk.Box):
             for position in self.path_to_stores.get(entry_path, ()):
                 self.view.select_path(Gtk.TreePath.new_from_indices([position]))
         if target is not None:
-            self.view.check_resize()
-            self.scroll.check_resize()
+            self.view.queue_resize()
+            self.scroll.queue_resize()
             desired_top = min(self.max_top(), max(0, target - 2 * self.capacity + 1))
+            self.model_layout_target = target
             self.scroll.get_vadjustment().set_value(desired_top * self.item_pitch())
+            GLib.timeout_add(30, self.align_filled_model, self.store, target, desired_top, 0)
         self.model_pending_target = None
         self.model_pending_select = False
         self.model_pending_range = None
@@ -945,31 +1075,46 @@ class Pane(Gtk.Box):
         if self is self.window.active:
             self.selected()
 
+    def align_filled_model(self, store, target, desired_top, attempts):
+        if self.store is not store or self.model_layout_target != target:
+            return False
+        adjustment = self.scroll.get_vadjustment()
+        desired = desired_top * self.item_pitch()
+        if adjustment.get_upper() - adjustment.get_page_size() < desired - self.item_pitch():
+            if attempts < 100:
+                GLib.timeout_add(30, self.align_filled_model, store, target, desired_top, attempts + 1)
+            else:
+                self.model_layout_target = None
+            return False
+        adjustment.set_value(desired)
+        position = self.store_position(target, desired_top)
+        if position is not None:
+            path = Gtk.TreePath.new_from_indices([position])
+            self.view.handler_block(self.cursor_handler)
+            self.view.set_cursor(path, None, False)
+            self.view.handler_unblock(self.cursor_handler)
+            self.view.scroll_to_path(path, False, 0.0, 0.0)
+        self.model_layout_target = None
+        return False
+
     def measure_item_geometry(self):
         if self.geometry_measured:
             return False
         self.geometry_attempts += 1
-        if self.view.get_realized() and self.scroll.get_vadjustment().get_value() < 1:
-            x = max(5, self.view.get_item_width() // 2)
-            starts = {}
-            for y in range(min(120, self.view.get_allocated_height())):
-                path = self.view.get_path_at_pos(x, y)
-                if path is not None:
-                    index = path.get_indices()[0]
-                    if index in {0, 2} and index not in starts:
-                        starts[index] = y
-                    if len(starts) == 2:
-                        break
-            if len(starts) == 2:
-                pitch = starts[2] - starts[0]
+        if (self.view.get_realized() and len(self.store) > 2
+                and self.scroll.get_vadjustment().get_value() < 1):
+            first_found, first = self.view.get_cell_rect(Gtk.TreePath.new_from_indices([0]), None)
+            next_found, next_row = self.view.get_cell_rect(Gtk.TreePath.new_from_indices([2]), None)
+            if first_found and next_found:
+                pitch = next_row.y - first.y
                 if 10 <= pitch <= 80:
                     self.row_pitch = pitch
-                    self.top_inset = starts[0]
+                    self.top_inset = first.y
                     self.geometry_measured = True
                     self.schedule_layout()
                     self.scroll.queue_draw()
                     return False
-        return self.geometry_attempts < 8
+        return self.geometry_attempts < 80
 
     def name_color(self, _column, renderer, model, row, *_data):
         selected = self.view.path_is_selected(model.get_path(row))
@@ -1110,8 +1255,7 @@ class Window(Gtk.ApplicationWindow):
 
     def __init__(self, app, args, state, client=None):
         super().__init__(application=app, title="Nightty")
-        icon_path = Path(__file__).resolve().parent.parent / "assets/nightty-icon-constellation.png"
-        self.set_icon(GdkPixbuf.Pixbuf.new_from_file_at_scale(str(icon_path), 256, 256, True))
+        self.set_icon_name("pw.blackbird.SurfaceWorkspace")
         self.app, self.args, self.state = app, args, state
         self.appearance = load_appearance(getattr(args, "appearance", None))
         self.palette = self.appearance["palette"]
@@ -1141,24 +1285,26 @@ class Window(Gtk.ApplicationWindow):
         self.restoring_workspace_tab = False
         self.transfer_popover = None
         self.set_default_size(1400, 900)
-        self.set_size_request(760, 500)
+        self.set_size_request(1500 if getattr(args, "smoke", False) else 760,
+                              900 if getattr(args, "smoke", False) else 500)
         if getattr(args, "maximized", False) and not getattr(args, "smoke", False):
             self.maximize()
-        self.connect("delete-event", self.hide_window)
-        self.connect("key-press-event", self.key)
-        self.gallery_key_capture = Gtk.EventControllerKey.new(self)
+        self.connect("close-request", self.hide_window)
+        connect_key(self, self.key, capture=True)
+        self.gallery_key_capture = Gtk.EventControllerKey.new()
+        self.add_controller(self.gallery_key_capture)
         self.gallery_key_capture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         self.gallery_key_capture.connect("key-pressed", self.capture_gallery_key)
 
         style = Gtk.CssProvider()
         style.load_from_data(stylesheet(self.appearance))
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), style, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), style, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         Gtk.Settings.get_default().set_property("gtk-application-prefer-dark-theme", True)
 
-        header = Gtk.HeaderBar(show_close_button=True, title="Nightty")
-        header.connect_after("draw", self.draw_window_edges)
-        self.tab_bar = Gtk.Box(spacing=0)
-        self.terminal_tab_bar = Gtk.Box(spacing=0)
+        header = Gtk.HeaderBar(show_title_buttons=True)
+        header.set_title_widget(Gtk.Label(label="Nightty"))
+        self.tab_bar = Box(spacing=0)
+        self.terminal_tab_bar = Box(spacing=0)
         self.tab_bar.pack_start(self.terminal_tab_bar, False, False, 0)
         header.pack_start(self.tab_bar)
         self.transfers_button = button("⇄", self.show_jobs)
@@ -1169,9 +1315,9 @@ class Window(Gtk.ApplicationWindow):
         header.pack_end(add_tab)
         self.set_titlebar(header)
 
-        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        outer.connect_after("draw", self.draw_window_edges)
-        self.add(outer)
+        outer = Box(orientation=Gtk.Orientation.VERTICAL)
+        self.set_child(outer)
+        self.smoke_paintable = Gtk.WidgetPaintable.new(outer) if getattr(args, "smoke", False) else None
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.NONE)
         self.stack.set_vhomogeneous(False)
         outer.pack_start(self.stack, True, True, 0)
@@ -1191,7 +1337,7 @@ class Window(Gtk.ApplicationWindow):
         self.browser_state_tab = None
         self.gallery_flow = None
 
-        project = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        project = Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.project_heading = label("Project", "heading")
         self.project_heading.set_margin_start(20)
         self.project_heading.set_margin_top(15)
@@ -1204,15 +1350,15 @@ class Window(Gtk.ApplicationWindow):
         project.pack_start(self.project_tabs, True, True, 0)
         self.overview = textview()
         self.project_tabs.append_page(scrolled(self.overview), Gtk.Label(label="Context"))
-        self.work_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=20)
+        self.work_box = Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=20)
         self.project_tabs.append_page(scrolled(self.work_box), Gtk.Label(label="Work"))
         self.agents_box = self.build_agents()
         self.project_tabs.append_page(self.agents_box, Gtk.Label(label="Agents"))
         self.project_tabs.connect("switch-page", lambda _n, _p, number: self.refresh_agents() if number == 2 else None)
         self.stack.add_named(project, "project")
 
-        inspector = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        inspector_toolbar = Gtk.Box(spacing=10, margin=8)
+        inspector = Box(orientation=Gtk.Orientation.VERTICAL)
+        inspector_toolbar = Box(spacing=10, margin=8)
         inspector_toolbar.pack_start(button("← Back  Esc", self.close_inspector), False, False, 0)
         self.inspector_name = label("", "heading")
         inspector_toolbar.pack_start(self.inspector_name, True, True, 0)
@@ -1225,49 +1371,53 @@ class Window(Gtk.ApplicationWindow):
         self.preview_stack.add_named(scrolled(self.document), "text")
         self.image = Gtk.Image()
         self.preview_stack.add_named(scrolled(self.image), "image")
-        inspector_body.pack1(self.preview_stack, resize=True, shrink=False)
-        details_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        details_box.get_style_context().add_class("inspector-details")
+        inspector_body.set_start_child(self.preview_stack)
+        inspector_body.set_resize_start_child(True)
+        inspector_body.set_shrink_start_child(False)
+        details_box = Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
+        details_box.add_css_class("inspector-details")
         details_box.set_size_request(280, -1)
         details_box.pack_start(label("DETAILS", "section"), False, False, 0)
         self.inspector_details = label("", "muted")
-        self.inspector_details.set_line_wrap(True)
+        self.inspector_details.set_wrap(True)
         self.inspector_details.set_ellipsize(Pango.EllipsizeMode.NONE)
         details_box.pack_start(self.inspector_details, False, False, 0)
-        inspector_body.pack2(scrolled(details_box), resize=False, shrink=False)
+        inspector_body.set_end_child(scrolled(details_box))
+        inspector_body.set_resize_end_child(False)
+        inspector_body.set_shrink_end_child(False)
         inspector_body.set_position(1000)
         self.stack.add_named(inspector, "inspect")
 
-        self.terminal_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.terminal_box = Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self.terminal_tabs = Gtk.Notebook(scrollable=True)
         self.terminal_tabs.set_show_tabs(False)
         self.terminal_tabs.connect("switch-page", self.terminal_page_changed)
         self.terminal_box.pack_start(self.terminal_tabs, True, True, 0)
         self.stack.add_named(self.terminal_box, "console")
 
-        self.info_box = Gtk.Box()
-        self.info_box.get_style_context().add_class("footer-box")
+        self.info_box = Box()
+        self.info_box.add_css_class("footer-box")
         self.global_status = label("", "footer-details")
         self.global_status.set_selectable(False)
         self.info_box.pack_start(self.global_status, True, True, 0)
         outer.pack_start(self.info_box, False, False, 0)
-        self.command_row = Gtk.Box(spacing=5)
-        self.command_row.get_style_context().add_class("command-row")
+        self.command_row = Box(spacing=5)
+        self.command_row.add_css_class("command-row")
         self.command_prompt = label("", "command-prompt")
         self.command_prompt.set_selectable(False)
         self.command_prompt.set_max_width_chars(70)
         self.command_row.pack_start(self.command_prompt, False, False, 0)
         self.command_entry = Gtk.Entry()
-        self.command_entry.get_style_context().add_class("command-entry")
+        self.command_entry.add_css_class("command-entry")
         self.command_entry.set_placeholder_text("")
         self.command_entry.set_tooltip_text("Run a shell command in the active pane's folder")
         self.command_entry.connect("activate", self.execute_command_line)
-        self.command_entry.connect("key-press-event", self.command_entry_key)
+        connect_key(self.command_entry, self.command_entry_key)
         self.command_row.pack_start(self.command_entry, True, True, 0)
         outer.pack_start(self.command_row, False, False, 0)
         self.space_cache = {}
         self.update_command_prompt()
-        self.show_all()
+        self.show()
         self.route_browser_arrows(self)
         self.set_mode("console")
         GLib.timeout_add(350, self.update_transfers)
@@ -1280,8 +1430,8 @@ class Window(Gtk.ApplicationWindow):
                    else self.initial_browser_state)
         file_panes = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         file_panes.set_wide_handle(True)
-        file_panes.connect_after("draw", self.draw_panel_divider)
-        file_panes.connect("size-allocate", self.resize_pane_split)
+        file_panes.add_css_class("file-split")
+        on_resize(file_panes, self.resize_pane_split)
         file_panes.connect("notify::position", self.remember_pane_split)
         self.file_panes = file_panes
         self.stack.add_named(file_panes, "files")
@@ -1291,12 +1441,14 @@ class Window(Gtk.ApplicationWindow):
             self.footer_height_group.add_widget(pane.status_box)
         self.active = self.panes[browser["active"]]
         self.browser_state_tab = self.current_workspace_tab
-        file_panes.pack1(self.panes[0], resize=True, shrink=False)
+        file_panes.set_start_child(self.panes[0])
+        file_panes.set_resize_start_child(True)
+        file_panes.set_shrink_start_child(True)
         self.right_stack = Gtk.Stack()
         self.right_stack.set_vhomogeneous(False)
         self.right_stack.add_named(self.panes[1], "files")
-        quick = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        quick_toolbar = Gtk.Box(spacing=8, margin=7)
+        quick = Box(orientation=Gtk.Orientation.VERTICAL)
+        quick_toolbar = Box(spacing=8, margin=7)
         quick_toolbar.pack_start(label("QUICK VIEW", "section"), True, True, 0)
         self.quick_dest_button = button("Destination ▾", lambda: self.show_locations(self.panes[1], self.quick_dest_button))
         quick_toolbar.pack_end(button("Close", self.toggle_quick_view), False, False, 0)
@@ -1316,14 +1468,16 @@ class Window(Gtk.ApplicationWindow):
         quick.pack_start(self.quick_preview_stack, True, True, 0)
         details_expander = Gtk.Expander(label="Details")
         self.quick_details = label("", "muted")
-        self.quick_details.set_line_wrap(True)
+        self.quick_details.set_wrap(True)
         self.quick_details.set_ellipsize(Pango.EllipsizeMode.NONE)
         self.quick_details.set_margin_start(12)
-        details_expander.add(scrolled(self.quick_details))
+        details_expander.set_child(scrolled(self.quick_details))
         quick.pack_start(details_expander, False, False, 0)
         self.right_stack.add_named(quick, "quick")
-        file_panes.pack2(self.right_stack, resize=True, shrink=False)
-        file_panes.show_all()
+        file_panes.set_end_child(self.right_stack)
+        file_panes.set_resize_end_child(True)
+        file_panes.set_shrink_end_child(True)
+        file_panes.show()
         self.route_browser_arrows(file_panes)
         self.activate_pane(self.active)
         for pane in self.panes:
@@ -1336,6 +1490,7 @@ class Window(Gtk.ApplicationWindow):
                 continue
             pane.gallery_flow = Gtk.FlowBox()
             pane.gallery_flow.set_can_focus(True)
+            pane.gallery_flow.set_focusable(True)
             pane.gallery_flow.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
             pane.gallery_flow.set_activate_on_single_click(False)
             pane.gallery_flow.set_row_spacing(8)
@@ -1350,21 +1505,21 @@ class Window(Gtk.ApplicationWindow):
             pane.gallery_flow.set_margin_bottom(120)
             pane.gallery_flow.connect("selected-children-changed", self.gallery_selected)
             pane.gallery_flow.connect("child-activated", self.gallery_activated)
-            pane.gallery_flow.connect("key-press-event", self.gallery_key)
-            pane.gallery_flow.connect("focus-in-event", lambda _flow, _event, target=pane: self.activate_pane(target))
-            pane.gallery_flow.connect("button-press-event", lambda flow, event, target=pane:
-                                      self.gallery_click(target, flow, event))
+            connect_key(pane.gallery_flow, self.gallery_key)
+            connect_focus(pane.gallery_flow, lambda _flow, _event, target=pane: self.activate_pane(target))
+            connect_click(pane.gallery_flow, lambda flow, event, target=pane:
+                          self.gallery_click(target, flow, event))
             pane.gallery_scroll = scrolled(pane.gallery_flow)
-            pane.gallery_scroll.connect("size-allocate", lambda _scroll, _allocation, target=pane:
-                                        self.gallery_resized(target))
+            on_resize(pane.gallery_scroll, lambda _scroll, _allocation, target=pane:
+                      self.gallery_resized(target))
             pane.gallery_scroll.get_vadjustment().connect("value-changed", lambda _adjustment, target=pane:
                                                           self.gallery_scroll_changed(target))
-            pane.gallery_scroll.connect_after("draw", lambda scroll, context, target=pane:
-                                              self.draw_gallery_edge(target, scroll, context))
-            pane.gallery_scroll.connect("button-press-event", lambda scroll, event, target=pane:
-                                        self.gallery_click(target, scroll, event))
-            pane.content_stack.add_named(pane.gallery_scroll, "gallery")
-            pane.gallery_scroll.show_all()
+            pane.gallery_overlay = drawing_overlay(pane.gallery_scroll,
+                lambda scroll, context, target=pane: self.draw_gallery_edge(target, scroll, context))
+            connect_click(pane.gallery_scroll, lambda scroll, event, target=pane:
+                          self.gallery_click(target, scroll, event))
+            pane.content_stack.add_named(pane.gallery_overlay, "gallery")
+            pane.gallery_scroll.show()
         self.gallery_flow = self.active.gallery_flow
 
     def file_color(self, name, directory, symlink, executable):
@@ -1392,39 +1547,6 @@ class Window(Gtk.ApplicationWindow):
         if suffix in {".txt", ".md", ".rst", ".org", ".srt", ".log", ".html", ".htm"}:
             return self.palette["foreground"]
         return self.palette["unknown"]
-
-    def draw_panel_divider(self, paned, context):
-        background = Gdk.RGBA()
-        background.parse(self.palette["background"])
-        surface = Gdk.RGBA()
-        surface.parse(self.palette["surface"])
-        border = Gdk.RGBA()
-        border.parse(self.palette["border"])
-        position = paned.get_position()
-        height = paned.get_allocated_height()
-        footer = self.panes[0].status_box.translate_coordinates(paned, 0, 0) if self.panes else None
-        footer_y = min(height, max(0, footer[1])) if footer is not None else height
-        context.set_source_rgba(background.red, background.green, background.blue, background.alpha)
-        context.rectangle(position - 1, 0, 7, footer_y)
-        context.fill()
-        context.set_source_rgba(surface.red, surface.green, surface.blue, surface.alpha)
-        context.rectangle(position - 1, footer_y, 7, height - footer_y)
-        context.fill()
-        context.set_source_rgba(border.red, border.green, border.blue, border.alpha)
-        context.rectangle(position, 0, 2, height)
-        context.rectangle(position + 3, 0, 2, height)
-        context.fill()
-        return False
-
-    def draw_window_edges(self, widget, context):
-        border = Gdk.RGBA()
-        border.parse(self.palette["border"])
-        context.set_source_rgba(border.red, border.green, border.blue, border.alpha)
-        width, height = widget.get_allocated_width(), widget.get_allocated_height()
-        context.rectangle(0, 0, 2, height)
-        context.rectangle(max(0, width - 2), 0, 2, height)
-        context.fill()
-        return False
 
     def resize_pane_split(self, paned, allocation):
         width = allocation.width
@@ -1584,7 +1706,7 @@ class Window(Gtk.ApplicationWindow):
         self.select_terminal(next(i for i, (terminal, _pid) in enumerate(self.terminals) if terminal is target))
 
     def top_tab_shortcut(self, key, state):
-        if not state & Gdk.ModifierType.CONTROL_MASK or state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.MOD1_MASK):
+        if not state & Gdk.ModifierType.CONTROL_MASK or state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.ALT_MASK):
             return False
         if key in {"Page_Up", "KP_Page_Up", "Prior", "KP_Prior"}:
             self.switch_top_tab(-1)
@@ -1596,14 +1718,13 @@ class Window(Gtk.ApplicationWindow):
 
     def route_browser_arrows(self, widget):
         if isinstance(widget, (Gtk.Button, Gtk.Label)):
-            widget.connect("key-press-event", self.browser_arrow_from_control)
-        if isinstance(widget, Gtk.Container):
-            for child in widget.get_children():
-                self.route_browser_arrows(child)
+            connect_key(widget, self.browser_arrow_from_control)
+        for child in widget_children(widget):
+            self.route_browser_arrows(child)
 
     def browser_arrow_from_control(self, _control, event):
         if self.mode not in {"files", "gallery"} or event.state & (Gdk.ModifierType.CONTROL_MASK
-                | Gdk.ModifierType.MOD1_MASK | Gdk.ModifierType.SUPER_MASK):
+                | Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.SUPER_MASK):
             return False
         key = Gdk.keyval_name(event.keyval)
         if key not in {"Left", "Right", "Up", "Down", "Home", "End",
@@ -1697,16 +1818,16 @@ class Window(Gtk.ApplicationWindow):
             noun = "item" if folders else "file"
             count = len(selected)
             suffix = " · folder contents excluded" if folders else ""
-            pane.status.get_style_context().add_class("footer-marked")
+            pane.status.add_css_class("footer-marked")
             pane.status.set_text(f"{count} {noun}{'' if count == 1 else 's'} selected  ·  {self.size(total)}{suffix}")
             pane.status.set_tooltip_text("Folder contents are not included in the size" if folders else "")
             return
         if selected:
             selected_path = next(iter(selected))
             row = next((entry for entry in pane.entries if entry[3] == selected_path), row)
-            pane.status.get_style_context().add_class("footer-marked")
+            pane.status.add_css_class("footer-marked")
         else:
-            pane.status.get_style_context().remove_class("footer-marked")
+            pane.status.remove_css_class("footer-marked")
         pane.status.set_tooltip_text("")
         if row is None:
             pane.status.set_text("No file selected")
@@ -1803,45 +1924,47 @@ class Window(Gtk.ApplicationWindow):
                 self.work_box.pack_start(label(str(reference), "muted"), False, False, 0)
             if not context["work"]:
                 self.work_box.pack_start(label("No work documents linked from this folder."), False, False, 0)
-            self.work_box.show_all()
+            self.work_box.show()
             self.status.set_text(str(path))
         self.async_call(load, loaded)
 
     def build_locations_menu(self, pane):
-        menu = Gtk.Menu()
+        menu = Gtk.Popover()
+        content = Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin=8)
         favourites = self.state.favourites
         current = Path(os.path.abspath(os.fspath(pane.path)))
         recent = [path for path in self.state.recent_folders
                   if path != current and path not in favourites][:12]
 
         def section(title, paths):
-            heading = Gtk.MenuItem(label=title)
-            heading.set_sensitive(False)
-            menu.append(heading)
+            heading = label(title, "section")
+            content.append(heading)
             if not paths:
-                empty = Gtk.MenuItem(label="None yet")
-                empty.set_sensitive(False)
-                menu.append(empty)
+                content.append(label("None yet", "muted"))
             for path in paths:
-                item = Gtk.MenuItem(label=str(path))
-                item.connect("activate", lambda _item, target=path: pane.navigate(target))
-                menu.append(item)
+                content.append(button(str(path),
+                    lambda target=path: (pane.navigate(target), menu.popdown())))
 
         section("Favourites", favourites)
-        menu.append(Gtk.SeparatorMenuItem())
+        content.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
         section("Recent folders", recent)
-        menu.append(Gtk.SeparatorMenuItem())
-        item = Gtk.MenuItem(label="★  Star this folder" if current not in favourites else "☆  Unstar this folder")
-        item.connect("activate", lambda *_: pane.favourite())
-        menu.append(item)
+        content.append(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL))
+        content.append(button("★  Star this folder" if current not in favourites else "☆  Unstar this folder",
+                              lambda: (pane.favourite(), menu.popdown())))
+        menu.set_child(content)
         return menu
 
     def show_locations(self, pane, anchor=None):
         menu = self.build_locations_menu(pane)
-        menu.show_all()
         anchor = anchor or (self.quick_dest_button if pane.index == 1 and self.quick_enabled and self.mode == "files"
                             else pane.locations_button)
-        menu.popup_at_widget(anchor, Gdk.Gravity.SOUTH_WEST, Gdk.Gravity.NORTH_WEST, None)
+        previous = getattr(anchor, "nightty_popover", None)
+        if previous is not None:
+            previous.popdown()
+            previous.unparent()
+        anchor.nightty_popover = menu
+        menu.set_parent(anchor)
+        menu.popup()
 
     def add_favourite(self):
         self.state.toggle_favourite(self.active.path)
@@ -1924,7 +2047,7 @@ class Window(Gtk.ApplicationWindow):
                 terminal.workspace_output_return_mode = previous_mode
         self.mode = mode
         if mode not in {"files", "gallery"}:
-            self.status.get_style_context().remove_class("footer-marked")
+            self.status.remove_css_class("footer-marked")
         if mode != "inspect":
             self.state.save(mode=mode)
             if terminal is not None and not self.restoring_workspace_tab:
@@ -1937,7 +2060,7 @@ class Window(Gtk.ApplicationWindow):
             self.load_project_context(self.active.path if self.browser_state_tab is terminal
                                       else browser["paths"][browser["active"]])
         if mode == "console":
-            self.terminal_box.show_all()
+            self.terminal_box.show()
             if not self.terminals:
                 self.new_terminal(reveal=False)
             terminal = self.terminals[self.terminal_tabs.get_current_page()][0]
@@ -1971,6 +2094,7 @@ class Window(Gtk.ApplicationWindow):
                     self.quick_serial += 1
                     self.right_stack.set_visible_child_name("files")
                 self.active.content_stack.set_visible_child_name("gallery")
+                self.active.gallery_overlay.drawing_area.queue_draw()
                 self.gallery_flow = self.active.gallery_flow
                 if previous_pane_mode != "gallery":
                     self.show_gallery(self.active)
@@ -1986,7 +2110,7 @@ class Window(Gtk.ApplicationWindow):
             GLib.idle_add(self.focus_browser_after_switch, mode)
 
     def focus_browser_after_switch(self, mode):
-        if self.mode == mode and self.get_visible():
+        if self.mode == mode and self.get_visible() and not text_has_focus(self.get_focus()):
             self.focus_active_browser()
         return False
 
@@ -1998,7 +2122,7 @@ class Window(Gtk.ApplicationWindow):
             if (child is None or not child.get_visible()
                     or getattr(child, "is_placeholder", False)):
                 child = (selected[-1] if selected else None) or next(
-                    (item for item in flow.get_children()
+                    (item for item in widget_children(flow)
                      if not getattr(item, "is_placeholder", False)), None)
             if child is not None:
                 if not selected:
@@ -2021,7 +2145,7 @@ class Window(Gtk.ApplicationWindow):
         if event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK):
             return False
         top = self.gallery_top(pane)
-        visible = [item for item in flow.get_children()
+        visible = [item for item in widget_children(flow)
                    if (hasattr(item, "gallery_index")
                        and top <= item.gallery_row < top + pane.gallery_capacity)]
         if child is not None and child not in visible:
@@ -2081,7 +2205,7 @@ class Window(Gtk.ApplicationWindow):
         flow = pane.gallery_flow
         if child.get_parent() is not flow:
             return False
-        children = flow.get_children()
+        children = widget_children(flow)
         if not children or not hasattr(child, "gallery_row"):
             return False
         _columns, pitch, _first_y = self.gallery_geometry(flow, children)
@@ -2099,7 +2223,7 @@ class Window(Gtk.ApplicationWindow):
                    pane.gallery_columns * pane.gallery_capacity)
 
     def gallery_top(self, pane):
-        children = pane.gallery_flow.get_children()
+        children = widget_children(pane.gallery_flow)
         if len(children) < 2:
             return 0
         _columns, pitch, _first_y = self.gallery_geometry(pane.gallery_flow, children)
@@ -2126,7 +2250,7 @@ class Window(Gtk.ApplicationWindow):
 
     def gallery_visible_bottom(self, pane):
         flow = pane.gallery_flow
-        children = flow.get_children()
+        children = widget_children(flow)
         if not children or children[0].get_allocated_height() <= 1:
             return pane.gallery_scroll.get_allocated_height()
         _columns, pitch, _first_y = self.gallery_geometry(flow, children)
@@ -2142,8 +2266,6 @@ class Window(Gtk.ApplicationWindow):
         return max(0, min(viewport, first_top + last_full_row * pitch + card_height))
 
     def draw_gallery_edge(self, pane, scroll, context):
-        if pane.content_stack.get_visible_child_name() != "gallery":
-            return False
         height = scroll.get_allocated_height()
         bottom = self.gallery_visible_bottom(pane)
         if bottom < height:
@@ -2158,11 +2280,11 @@ class Window(Gtk.ApplicationWindow):
         if pane.gallery_scroll_snap_source:
             GLib.source_remove(pane.gallery_scroll_snap_source)
         pane.gallery_scroll_snap_source = GLib.timeout_add(45, self.snap_gallery_scroll, pane)
-        pane.gallery_scroll.queue_draw()
+        pane.gallery_overlay.drawing_area.queue_draw()
 
     def snap_gallery_scroll(self, pane):
         pane.gallery_scroll_snap_source = 0
-        children = pane.gallery_flow.get_children()
+        children = widget_children(pane.gallery_flow)
         if len(children) > 1:
             _columns, pitch, _first_y = self.gallery_geometry(pane.gallery_flow, children)
             adjustment = pane.gallery_scroll.get_vadjustment()
@@ -2175,18 +2297,15 @@ class Window(Gtk.ApplicationWindow):
 
     def gallery_layout(self, pane):
         flow = pane.gallery_flow
-        children = flow.get_children()
+        children = widget_children(flow)
         width = pane.gallery_scroll.get_allocated_width()
         columns = 2 if width >= 2 * 310 + flow.get_column_spacing() + 14 else 1
         card_height, pitch = 108, 108 + flow.get_row_spacing()
         first_y = flow.get_margin_top()
         if len(children) > 1 and children[0].get_allocated_height() > 1:
             _old_columns, measured_pitch, _first_y = self.gallery_geometry(flow, children)
-            card_height = children[0].get_allocated_height()
-            pitch = measured_pitch
-            origin = children[0].translate_coordinates(pane.gallery_scroll, 0, 0)
-            if origin is not None:
-                first_y = origin[1] + pane.gallery_scroll.get_vadjustment().get_value()
+            card_height = max(108, children[0].get_allocated_height())
+            pitch = max(card_height + flow.get_row_spacing(), measured_pitch)
         viewport = pane.gallery_scroll.get_allocated_height()
         capacity = max(1, math.floor((viewport - first_y - card_height) / pitch) + 1)
         return columns, capacity
@@ -2205,7 +2324,7 @@ class Window(Gtk.ApplicationWindow):
         pane.gallery_resize_source = 0
         if (not pane.gallery_building
                 and pane.content_stack.get_visible_child_name() == "gallery"
-                and pane.gallery_flow.get_children()
+                and widget_children(pane.gallery_flow)
                 and self.gallery_layout(pane) != (pane.gallery_columns, pane.gallery_capacity)):
             self.show_gallery(pane)
         return False
@@ -2229,12 +2348,12 @@ class Window(Gtk.ApplicationWindow):
             return True
         if (self.mode == "files" and key in {"Insert", "KP_Insert"}
                 and not state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.CONTROL_MASK
-                               | Gdk.ModifierType.MOD1_MASK | Gdk.ModifierType.SUPER_MASK)):
+                               | Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.SUPER_MASK)):
             self.active.view.grab_focus()
             self.active.toggle_mark_current()
             return True
         if (self.mode in {"files", "gallery"} and key in {"Tab", "ISO_Left_Tab"}
-                and not state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK
+                and not state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK
                                | Gdk.ModifierType.SUPER_MASK)
                 and not isinstance(focus, Vte.Terminal)):
             if self.mode == "files" and self.quick_enabled:
@@ -2242,10 +2361,10 @@ class Window(Gtk.ApplicationWindow):
             self.switch_browser_pane()
             return True
         if (self.mode == "files" and key in {"Home", "End", "KP_Home", "KP_End"}
-                and not isinstance(focus, (Gtk.Entry, Gtk.TextView, Vte.Terminal))):
+                and not text_has_focus(focus)):
             self.active.view.grab_focus()
             return self.active.move_by_key(self.active.view, argparse.Namespace(keyval=keyval, state=state))
-        if self.mode != "gallery" or isinstance(focus, (Gtk.Entry, Gtk.TextView, Vte.Terminal)):
+        if self.mode != "gallery" or text_has_focus(focus):
             return False
         if key not in {"Left", "Right", "Up", "Down", "Home", "End",
                        "KP_Left", "KP_Right", "KP_Up", "KP_Down", "KP_Home", "KP_End"}:
@@ -2254,7 +2373,7 @@ class Window(Gtk.ApplicationWindow):
 
     def gallery_key(self, flow, event):
         if self.mode != "gallery" or flow is not self.active.gallery_flow or event.state & (Gdk.ModifierType.CONTROL_MASK
-                | Gdk.ModifierType.MOD1_MASK | Gdk.ModifierType.SUPER_MASK):
+                | Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.SUPER_MASK):
             return False
         key = Gdk.keyval_name(event.keyval)
         if key in {"Tab", "ISO_Left_Tab"}:
@@ -2310,7 +2429,7 @@ class Window(Gtk.ApplicationWindow):
             self.active.gallery_pending_top = next_top
             return True
         self.active.gallery_scroll.get_vadjustment().set_value(
-            next_top * self.gallery_geometry(flow, flow.get_children())[1])
+            next_top * self.gallery_geometry(flow, widget_children(flow))[1])
         target = self.gallery_child_for_index(self.active, target_index, next_top)
         if target is None:
             self.active.gallery_pending_target = target_index
@@ -2348,7 +2467,7 @@ class Window(Gtk.ApplicationWindow):
         serial = pane.gallery_serial
         pane.gallery_building = True
         flow = pane.gallery_flow
-        old_children = flow.get_children()
+        old_children = widget_children(flow)
         focus = self.get_focus()
         focused_path = focus.file_path if focus in old_children and hasattr(focus, "file_path") else None
         should_focus_gallery = (pane is self.active and self.mode == "gallery"
@@ -2434,21 +2553,28 @@ class Window(Gtk.ApplicationWindow):
                 position += 40
                 if position >= len(ordered):
                     pane.gallery_building = False
-                    flow.check_resize()
-                    pane.gallery_scroll.check_resize()
-                    _columns, pitch, _first_y = self.gallery_geometry(flow, flow.get_children()) if flow.get_children() else (1, 1, 0)
+                    flow.queue_resize()
+                    pane.gallery_scroll.queue_resize()
+                    pane.gallery_overlay.drawing_area.queue_draw()
+                    _columns, pitch, _first_y = self.gallery_geometry(flow, widget_children(flow)) if widget_children(flow) else (1, 1, 0)
                     pane.gallery_scroll.get_vadjustment().set_value(
                         min(pane.gallery_pending_top if pane.gallery_pending_top is not None else previous_top,
                             self.gallery_max_top(pane)) * pitch)
-                    if should_focus_gallery:
-                        selected = flow.get_selected_children()
-                        if selected:
-                            focused = next((item for item in selected if item.file_path == focused_path), selected[0])
-                            target = self.gallery_child_for_index(pane, focused.gallery_index, previous_top)
-                            target.grab_focus()
+                    selected = flow.get_selected_children()
+                    if selected:
+                        focused = next((item for item in selected if item.file_path == focused_path), selected[0])
+                        target = self.gallery_child_for_index(pane, focused.gallery_index, previous_top)
+                        if target is not None:
                             self.scroll_gallery_to(target)
+                            GLib.timeout_add(60, lambda: (self.scroll_gallery_to(target), False)[1]
+                                             if serial == pane.gallery_serial else False)
+                    if should_focus_gallery:
+                        if selected and target is not None:
+                            target.grab_focus()
                         else:
                             flow.grab_focus()
+                    elif focus is not None and focus.get_root() is self:
+                        focus.grab_focus()
                     pane.gallery_pending_top = None
                     self.gallery_resized(pane)
                     self.refresh_file_footer(pane)
@@ -2466,69 +2592,69 @@ class Window(Gtk.ApplicationWindow):
         child.set_size_request(310, 108)
         child.set_can_focus(False)
         child.set_sensitive(False)
-        pane.gallery_flow.add(child)
+        pane.gallery_flow.insert(child, -1)
         child.show()
 
     def add_gallery_tile(self, pane, name, directory, size, path, parent, serial):
         child = Gtk.FlowBoxChild()
         child.gallery_pane = pane
         child.file_path, child.is_directory, child.is_parent = path, directory, parent
-        child.connect("key-press-event", lambda _child, event, flow=pane.gallery_flow: self.gallery_key(flow, event))
-        child.connect("button-press-event", lambda item, event: self.gallery_click(pane, item, event, item))
+        connect_key(child, lambda _child, event, flow=pane.gallery_flow: self.gallery_key(flow, event))
+        connect_click(child, lambda item, event: self.gallery_click(pane, item, event, item))
         child.set_size_request(310, 108)
         if parent:
-            parent_tile = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-            parent_tile.get_style_context().add_class("gallery-tile")
+            parent_tile = Box(orientation=Gtk.Orientation.VERTICAL)
+            parent_tile.add_css_class("gallery-tile")
             parent_label = Gtk.Label(label="..", xalign=0.5, yalign=0.5)
-            parent_label.get_style_context().add_class("gallery-parent")
+            parent_label.add_css_class("gallery-parent")
             parent_label.set_tooltip_text("Parent directory")
             parent_tile.pack_start(parent_label, True, True, 0)
-            child.add(parent_tile)
-            pane.gallery_flow.add(child)
-            child.show_all()
+            child.set_child(parent_tile)
+            pane.gallery_flow.insert(child, -1)
+            child.show()
             return child
-        tile = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        tile.get_style_context().add_class("gallery-tile")
+        tile = Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        tile.add_css_class("gallery-tile")
         preview = Gtk.Stack()
         preview.set_size_request(92, 80)
         if directory:
-            image = Gtk.Image.new_from_icon_name("folder", Gtk.IconSize.DIALOG)
+            image = Gtk.Image.new_from_icon_name("folder")
         else:
             guessed_type = Gio.content_type_guess(str(path), None)[0] or "application/octet-stream"
             type_icon = Gio.content_type_get_icon(guessed_type)
-            image = (Gtk.Image.new_from_gicon(type_icon, Gtk.IconSize.DIALOG) if type_icon
-                     else Gtk.Image.new_from_icon_name("text-x-generic", Gtk.IconSize.DIALOG))
+            image = (Gtk.Image.new_from_gicon(type_icon) if type_icon
+                     else Gtk.Image.new_from_icon_name("text-x-generic"))
         image.set_pixel_size(64)
         preview.add_named(image, "image")
         child.preview_image = image
         excerpt = Gtk.Label(xalign=0, yalign=0)
         excerpt.set_size_request(92, 80)
-        excerpt.set_line_wrap(True)
-        excerpt.get_style_context().add_class("gallery-excerpt")
+        excerpt.set_wrap(True)
+        excerpt.add_css_class("gallery-excerpt")
         preview.add_named(excerpt, "text")
         tile.pack_start(preview, False, False, 0)
-        details = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        details = Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         details.set_hexpand(True)
         name_label = Gtk.Label(label=name, xalign=0)
-        name_label.get_style_context().add_class("gallery-name")
+        name_label.add_css_class("gallery-name")
         if directory:
-            name_label.get_style_context().add_class("gallery-folder-name")
+            name_label.add_css_class("gallery-folder-name")
         name_label.set_ellipsize(Pango.EllipsizeMode.END)
         name_label.set_max_width_chars(22)
         name_label.set_tooltip_text(str(path))
         details.pack_start(name_label, False, False, 0)
         kind_label = Gtk.Label(label="Folder" if directory else self.size(size), xalign=0)
-        kind_label.get_style_context().add_class("muted")
+        kind_label.add_css_class("muted")
         kind_label.set_ellipsize(Pango.EllipsizeMode.END)
         details.pack_start(kind_label, False, False, 0)
         extra_label = Gtk.Label(xalign=0)
-        extra_label.get_style_context().add_class("muted")
+        extra_label.add_css_class("muted")
         extra_label.set_ellipsize(Pango.EllipsizeMode.END)
         details.pack_start(extra_label, False, False, 0)
         tile.pack_start(details, True, True, 0)
-        child.add(tile)
-        pane.gallery_flow.add(child)
-        child.show_all()
+        child.set_child(tile)
+        pane.gallery_flow.insert(child, -1)
+        child.show()
 
         def render():
             if serial != pane.gallery_serial:
@@ -2575,7 +2701,7 @@ class Window(Gtk.ApplicationWindow):
                 excerpt.set_text(value)
                 preview.set_visible_child_name("text")
             elif kind == "icon":
-                image.set_from_gicon(Gio.content_type_get_icon(value), Gtk.IconSize.DIALOG)
+                image.set_from_gicon(Gio.content_type_get_icon(value))
                 image.set_pixel_size(64)
 
         if path in pane.gallery_preview_results:
@@ -2680,13 +2806,9 @@ class Window(Gtk.ApplicationWindow):
         source_label = ("marked" if self.mode == "files" and self.active.marked_paths
                         else "current" if self.mode == "files" and len(sources) == 1
                         else "selected")
-        dialog = yes_no_dialog(self, f"Copy {len(sources)} {source_label} item(s) in the background?",
-            str(destination) + "\nExisting destinations will be left unchanged.")
-        response = dialog.run()
-        dialog.destroy()
-        if response != Gtk.ResponseType.YES:
-            return
-        self.start_copy(sources, destination)
+        confirm(self, f"Copy {len(sources)} {source_label} item(s) in the background?",
+                str(destination) + "\nExisting destinations will be left unchanged.",
+                lambda: self.start_copy(sources, destination))
 
     def start_copy(self, sources, destination):
         job = Transfer(sources, destination)
@@ -2729,28 +2851,29 @@ class Window(Gtk.ApplicationWindow):
 
     def show_jobs(self):
         if self.transfer_popover is None:
-            self.transfer_popover = Gtk.Popover.new(self.transfers_button)
-            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=10)
+            self.transfer_popover = Gtk.Popover()
+            self.transfer_popover.set_parent(self.transfers_button)
+            content = Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=10)
             content.pack_start(label("BACKGROUND TRANSFERS", "section"), False, False, 0)
             self.jobs_label = label("")
             self.jobs_label.set_ellipsize(Pango.EllipsizeMode.NONE)
-            self.jobs_label.set_line_wrap(True)
+            self.jobs_label.set_wrap(True)
             jobs_scroll = scrolled(self.jobs_label)
             jobs_scroll.set_size_request(360, 180)
             content.pack_start(jobs_scroll, True, True, 0)
             self.cancel_transfers_button = button("Cancel running transfers", lambda:
                 [job.cancel.set() for job in self.jobs if job.status in {"queued", "copying"}])
             content.pack_start(self.cancel_transfers_button, False, False, 0)
-            self.transfer_popover.add(content)
+            self.transfer_popover.set_child(content)
         if self.transfer_popover.get_visible():
             self.transfer_popover.popdown()
             return
         self.update_transfers()
-        self.transfer_popover.show_all()
+        self.transfer_popover.show()
         self.transfer_popover.popup()
 
     def command_key(self, event):
-        modifiers = (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK
+        modifiers = (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK
                      | Gdk.ModifierType.SUPER_MASK | Gdk.ModifierType.META_MASK)
         if self.mode not in {"files", "gallery"} or event.state & modifiers:
             return False
@@ -2772,7 +2895,7 @@ class Window(Gtk.ApplicationWindow):
     def command_entry_key(self, _entry, event):
         key = Gdk.keyval_name(event.keyval)
         if (event.state & Gdk.ModifierType.CONTROL_MASK
-                and not event.state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.MOD1_MASK)
+                and not event.state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.ALT_MASK)
                 and self.mode_shortcut(key)):
             return True
         if key == "Escape":
@@ -2940,7 +3063,7 @@ class Window(Gtk.ApplicationWindow):
         key = (Gdk.keyval_name(event.keyval) or "").lower()
         control = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
-        alt = bool(event.state & Gdk.ModifierType.MOD1_MASK)
+        alt = bool(event.state & Gdk.ModifierType.ALT_MASK)
         if self.top_tab_shortcut(Gdk.keyval_name(event.keyval), event.state):
             return True
         if (control or shift) and not alt and key in {"return", "kp_enter"}:
@@ -3006,8 +3129,8 @@ class Window(Gtk.ApplicationWindow):
                             [rgba(color) for color in self.appearance["ansi"]])
         terminal.set_audible_bell(False)
         terminal.set_scroll_on_keystroke(True)
-        terminal.connect("button-press-event", self.terminal_menu)
-        terminal.connect("key-press-event", self.terminal_shortcut)
+        connect_click(terminal, self.terminal_menu)
+        connect_key(terminal, self.terminal_shortcut, capture=True)
         terminal.workspace_ready = False
         terminal.workspace_spawned = False
         terminal.workspace_ready_source = 0
@@ -3037,22 +3160,22 @@ class Window(Gtk.ApplicationWindow):
         title = Gtk.Label(label=tab_name)
         page = scrolled(terminal)
         index = self.terminal_tabs.append_page(page, title)
-        page.show_all()
+        page.show()
         title.show()
         terminal.workspace_page_index = index
-        tab_group = Gtk.Box(spacing=0)
+        tab_group = Box(spacing=0)
         tab_button = button(tab_name, lambda target=terminal: self.select_terminal(target.workspace_page_index))
-        tab_button.get_style_context().add_class("top-tab")
+        tab_button.add_css_class("top-tab")
         tab_button.set_tooltip_text(f"{tab_name} · {folder}")
         tab_button.get_child().set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         tab_button.get_child().set_max_width_chars(24)
         close_button = button("×", lambda target=terminal: self.close_terminal(target))
-        close_button.get_style_context().add_class("tab-close")
+        close_button.add_css_class("tab-close")
         close_button.set_tooltip_text(f"Close shell in {folder}")
         tab_group.pack_start(tab_button, False, False, 0)
         tab_group.pack_start(close_button, False, False, 0)
         self.terminal_tab_bar.pack_start(tab_group, False, False, 0)
-        tab_group.show_all()
+        tab_group.show()
         terminal.workspace_tab_button = tab_button
         terminal.workspace_tab_group = tab_group
         record = [terminal, 0]
@@ -3112,15 +3235,15 @@ class Window(Gtk.ApplicationWindow):
             return
         pid = self.terminals[index][1]
         if pid and not force:
-            dialog = yes_no_dialog(self, "Close this terminal tab and end its process?")
-            response = dialog.run()
-            dialog.destroy()
-            if response != Gtk.ResponseType.YES:
-                return
-            try:
-                os.kill(pid, signal.SIGHUP)
-            except ProcessLookupError:
-                pass
+            def approved():
+                try:
+                    os.kill(pid, signal.SIGHUP)
+                except ProcessLookupError:
+                    pass
+                self.close_terminal(terminal, force=True)
+
+            confirm(self, "Close this terminal tab and end its process?", None, approved)
+            return
         terminal.workspace_closed = True
         was_active = terminal is self.current_workspace_tab
         if terminal is self.command_terminal:
@@ -3134,8 +3257,7 @@ class Window(Gtk.ApplicationWindow):
             self.current_workspace_tab = None
         if not self.terminals:
             if from_shell_exit:
-                if not self.quit():
-                    self.new_terminal()
+                self.quit(on_cancel=self.new_terminal)
                 return
             self.new_terminal()
         elif was_active:
@@ -3147,36 +3269,42 @@ class Window(Gtk.ApplicationWindow):
             return self.open_terminal_link(terminal, event)
         if event.button != 3:
             return False
-        menu = Gtk.Menu()
+        old_menu = getattr(terminal, "workspace_menu", None)
+        if old_menu is not None:
+            old_menu.popdown()
+            old_menu.unparent()
+        menu = Gtk.Popover()
+        menu.set_parent(terminal)
+        point = Gdk.Rectangle()
+        point.x, point.y = int(event.x), int(event.y)
+        point.width = point.height = 1
+        menu.set_pointing_to(point)
+        content = Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin=6)
         for title, callback in (("Copy", lambda: terminal.copy_clipboard_format(Vte.Format.TEXT)),
                                 ("Paste", lambda: self.paste_terminal_clipboard(terminal)),
                                 ("Send Ctrl+O", lambda: terminal.feed_child(b"\x0f"))):
-            item = Gtk.MenuItem(label=title)
-            item.connect("activate", lambda _item, action=callback: action())
-            menu.append(item)
-        menu.show_all()
-        menu.popup_at_pointer(event)
+            content.append(button(title, lambda action=callback: (action(), menu.popdown())))
+        menu.set_child(content)
+        terminal.workspace_menu = menu
+        menu.popup()
         return True
 
     def paste_terminal_clipboard(self, terminal):
-        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-
-        def targets_ready(_clipboard, targets, _data):
-            if terminal.workspace_exited or getattr(terminal, "workspace_closed", False):
-                return
-            if (targets and Gtk.targets_include_image(targets, False)
-                    and self.terminal_has_foreground_program(terminal)):
-                # The foreground TUI (for example Codex) reads the image itself.
-                terminal.feed_child(b"\x16")
-            else:
-                terminal.paste_clipboard()
-
-        clipboard.request_targets(targets_ready)
+        if terminal.workspace_exited or getattr(terminal, "workspace_closed", False):
+            return
+        formats = Gdk.Display.get_default().get_clipboard().get_formats()
+        has_image = (formats.contain_gtype(Gdk.Texture.__gtype__)
+                     or any(mime.startswith("image/") for mime in formats.get_mime_types() or ()))
+        if has_image and self.terminal_has_foreground_program(terminal):
+            # The foreground TUI (for example Codex) reads the image itself.
+            terminal.feed_child(b"\x16")
+        else:
+            terminal.paste_clipboard()
 
     def open_terminal_link(self, terminal, event):
-        uri = terminal.hyperlink_check_event(event)
+        uri = terminal.check_hyperlink_at(event.x, event.y)
         if not uri:
-            match, tag = terminal.match_check_event(event)
+            match, tag = terminal.check_match_at(event.x, event.y)
             if not match:
                 return False
             if tag == terminal.workspace_url_tag:
@@ -3200,8 +3328,8 @@ class Window(Gtk.ApplicationWindow):
         return True
 
     def build_agents(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=15)
-        controls = Gtk.Box(spacing=8)
+        box = Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=15)
+        controls = Box(spacing=8)
         self.profile_picker = Gtk.ComboBoxText()
         self.session_picker = Gtk.ComboBoxText()
         controls.pack_start(self.profile_picker, False, False, 0)
@@ -3356,18 +3484,16 @@ class Window(Gtk.ApplicationWindow):
         self.hide()
         return True
 
-    def quit(self):
+    def quit(self, confirmed=False, on_cancel=None):
         active_terminals = any(pid for _terminal, pid in self.terminals)
         active_jobs = any(j.status in {"queued", "copying"} for j in self.jobs)
-        if active_terminals or active_jobs:
+        if (active_terminals or active_jobs) and not confirmed:
             question = ("Quit Nightty and close its terminals?" if active_terminals
                         else "Quit Nightty and cancel unfinished copies?")
-            dialog = yes_no_dialog(self, question,
-                "Hiding keeps everything running. Quitting closes embedded terminals and cancels unfinished copies; completed files are kept.")
-            response = dialog.run()
-            dialog.destroy()
-            if response != Gtk.ResponseType.YES:
-                return False
+            confirm(self, question,
+                    "Hiding keeps everything running. Quitting closes embedded terminals and cancels unfinished copies; completed files are kept.",
+                    lambda: self.quit(confirmed=True), on_cancel)
+            return False
         for job in self.jobs:
             job.cancel.set()
         self.pool.shutdown(wait=False, cancel_futures=True)
@@ -3380,7 +3506,7 @@ class Window(Gtk.ApplicationWindow):
     def key(self, _widget, event):
         ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
         shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
-        alt = bool(event.state & Gdk.ModifierType.MOD1_MASK)
+        alt = bool(event.state & Gdk.ModifierType.ALT_MASK)
         key = Gdk.keyval_name(event.keyval)
         terminal_focus = any(terminal.has_focus() for terminal, _pid in self.terminals)
         if self.top_tab_shortcut(key, event.state):
@@ -3439,13 +3565,13 @@ class Window(Gtk.ApplicationWindow):
         elif alt and key == "Up":
             self.active.up()
         elif (key in {"Tab", "ISO_Left_Tab"} and self.mode == "files" and not terminal_focus
-              and not event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK
+              and not event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK
                                      | Gdk.ModifierType.SUPER_MASK)):
             if self.quick_enabled:
                 self.toggle_quick_view()
             self.switch_browser_pane()
         elif (key in {"Tab", "ISO_Left_Tab"} and self.mode == "gallery"
-              and not event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK
+              and not event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK
                                      | Gdk.ModifierType.SUPER_MASK)):
             self.switch_browser_pane()
         elif key == "F3":

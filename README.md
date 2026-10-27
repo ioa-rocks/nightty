@@ -77,12 +77,17 @@ enforced by Second Brain. Metadata cannot supply executable commands or credenti
 
 ## Run
 
-Uses the system Python and installed PyGObject, GTK 3, VTE 2.91 and GdkPixbuf.
-The installed VTE binding targets GTK 3; no Python environment or dependency
-download is required on the development host. BIV uses GTK 4; its viewing logic
-and service interfaces are future reuse candidates, not embedded by this slice.
+Uses the system Python and installed PyGObject, GTK 4, VTE 3.91 and GdkPixbuf.
+The VTE 3.91 introspection namespace is the GTK 4 binding. No Python environment
+or dependency download is required on the development host. BIV also uses GTK 4;
+its viewing logic and service interfaces are future reuse candidates, not
+embedded by this slice.
 PDF previews use `pdftocairo` when it is installed; other file views continue
 to work without it.
+
+The Files pane still uses `Gtk.IconView`, agent selectors use `Gtk.ComboBoxText`,
+and confirmations use `Gtk.Dialog`. GTK 4 supports these widgets but deprecated
+them in 4.10; replacing them is follow-up work for GTK 5 readiness.
 
 ```sh
 ./run.sh --left /path/to/work --right /path/to/another/folder

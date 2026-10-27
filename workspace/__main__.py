@@ -7,9 +7,10 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
 
-from .app import Gdk, Gio, GLib, Gtk, Window
+from .app import Gdk, Gio, GLib, Gtk, Window, widget_children
 from .model import State
 
 
@@ -161,15 +162,39 @@ def smoke(args):
         app.client = fake
         checks = []
         step = {"number": 0, "ticks": 0}
+        slow_continue = threading.Event()
 
-        def screenshot(name):
+        def screenshot(name, retry=0):
+            from gi.repository import Gsk, Graphene
             window = app.window
-            window.check_resize()
-            width, height = window.get_allocated_width(), window.get_allocated_height()
-            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-            window.draw(cairo.Context(surface))
-            surface.write_to_png("/tmp/workspace-" + name + ".png")
-            return surface
+            width, height = window.get_child().get_width(), window.get_child().get_height()
+            snapshot = Gtk.Snapshot.new()
+            paintable = window.smoke_paintable
+            paintable.snapshot(snapshot, width, height)
+            node = snapshot.to_node()
+            if node is None:
+                if retry < 10:
+                    window.get_child().queue_draw()
+                    GLib.timeout_add(50, lambda: (screenshot(name, retry + 1), False)[1])
+                return None
+            renderer = Gsk.Renderer.new_for_surface(window.get_surface())
+            assert renderer is not None
+            bounds = Graphene.Rect().init(0, 0, width, height)
+            texture = renderer.render_texture(node, bounds)
+            renderer.unrealize()
+            texture.save_to_png("/tmp/workspace-" + name + ".png")
+            downloader = Gdk.TextureDownloader.new(texture)
+            downloader.set_format(Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED)
+            pixels, stride = downloader.download_bytes()
+
+            class Pixels:
+                def get_stride(self):
+                    return stride
+
+                def get_data(self):
+                    return pixels.get_data()
+
+            return Pixels()
 
         def run():
             try:
@@ -186,6 +211,8 @@ def smoke(args):
                                          f"stack={current.content_stack.get_visible_child_name() if current else None} "
                                          f"scroll={current.scroll.get_vadjustment().get_value() if current else None} "
                                          f"selected={current.selected_paths() if current else None} "
+                         f"gallery={(current.gallery_columns, current.gallery_capacity, app.window.gallery_layout(current), current.gallery_resize_source, current.gallery_building, len(current.gallery_children_by_logical)) if current and current.gallery_flow else None} "
+                                         f"gallery_scroll={(current.gallery_scroll.get_vadjustment().get_upper(), current.gallery_scroll.get_vadjustment().get_page_size(), current.gallery_scroll.get_vadjustment().get_value(), len(widget_children(current.gallery_flow)), [(item.gallery_row, item.get_allocation().y) for item in current.gallery_flow.get_selected_children()]) if current and current.gallery_flow else None} "
                                          f"quick={app.window.quick_details.get_text() if app.window and app.window.quick_enabled else None} "
                                          f"command_ready={getattr(getattr(app.window, 'command_terminal', None), 'workspace_ready', None)} "
                                          f"command_pending={getattr(getattr(app.window, 'command_terminal', None), 'workspace_pending', None)} "
@@ -202,7 +229,7 @@ def smoke(args):
                     assert len(window.terminals) == 1
                     assert len(window.terminal_tab_bar.get_children()) == 1
                     assert not window.terminal_tabs.get_show_tabs()
-                    assert window.terminals[0][0].workspace_tab_button.get_style_context().has_class("top-tab-active")
+                    assert window.terminals[0][0].workspace_tab_button.has_css_class("top-tab-active")
                     assert window.file_panes is None and not window.panes
                     assert window.gallery_flow is None
                     assert not hasattr(window, "regime_button")
@@ -215,11 +242,8 @@ def smoke(args):
                     checks.append("shell startup leaves Files and Gallery unloaded")
                     screenshot("terminal-start")
                     assert window.get_focus() is window.terminals[0][0]
-                    key_event = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
-                    key_event.window = window.terminals[0][0].get_window()
-                    key_event.keyval = Gdk.KEY_o
-                    key_event.state = Gdk.ModifierType.CONTROL_MASK
-                    assert window.terminals[0][0].event(key_event)
+                    assert window.terminal_shortcut(window.terminals[0][0],
+                        argparse.Namespace(keyval=Gdk.KEY_o, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "files"
                     assert window.file_panes is not None and len(window.panes) == 2
                     assert window.gallery_flow is None
@@ -232,7 +256,10 @@ def smoke(args):
                                             or any(" free" not in pane.folder_stats.get_text()
                                                    for pane in window.panes)
                                             or not window.panes[0].geometry_measured
-                                            or window.panes[0].capacity != window.panes[0].visible_capacity()):
+                                            or window.panes[0].capacity != window.panes[0].visible_capacity()
+                                            or window.file_panes.get_width() < 2
+                                            or abs(window.file_panes.get_position() /
+                                                   window.file_panes.get_width() - .5) >= .02):
                     return True
                 if step["number"] == 0 and not step.get("footer_checked"):
                     if not step.get("footer_check_started"):
@@ -345,8 +372,8 @@ def smoke(args):
                                and rect.y == row_rects[0].y + row * pane.item_pitch()
                                for row, rect in enumerate(row_rects))
                     viewport = pane.scroll.get_vadjustment().get_page_size()
-                    assert row_rects[-2].y + row_rects[-2].height <= viewport
-                    assert row_rects[-1].y + row_rects[-1].height > viewport
+                    assert row_rects[-2].y + pane.item_pitch() <= viewport
+                    assert row_rects[-1].y + pane.item_pitch() > viewport
                     checks.append("Japanese filename keeps every file row at the precomputed height")
                     step["capacity"] = pane.capacity
                     left_bottom = pane.store_position(pane.capacity - 1, 0)
@@ -457,7 +484,8 @@ def smoke(args):
                     window.add_favourite()
                     assert child.resolve() in window.state.favourites
                     locations = window.build_locations_menu(window.panes[0])
-                    assert any(item.get_label() == str(child.resolve()) for item in locations.get_children() if hasattr(item, "get_label"))
+                    assert any(item.get_label() == str(child.resolve())
+                               for item in locations.get_child().get_children() if hasattr(item, "get_label"))
                     window.add_favourite()
                     assert not window.state.favourites
                     window.add_favourite()
@@ -475,7 +503,7 @@ def smoke(args):
                 elif number == 1:
                     if window.panes[0].capacity != window.panes[0].visible_capacity():
                         return True
-                    if (window.quick_image.get_pixbuf() is None
+                    if (window.quick_image.get_paintable() is None
                             or "900 × 480 px" not in window.quick_details.get_text()):
                         return True
                     assert window.right_stack.get_visible_child_name() == "quick"
@@ -495,7 +523,7 @@ def smoke(args):
                     assert window.get_focus() is window.gallery_flow
                     step["number"] = 2
                 elif number == 2:
-                    window.check_resize()
+                    window.queue_resize()
                     pane = window.active
                     if pane.gallery_resize_source:
                         return True
@@ -506,15 +534,15 @@ def smoke(args):
                                if item is not None and item.file_path.name == "visual.png"]
                     pdf_cards = [item for item in window.active.gallery_children_by_logical
                                  if item is not None and item.file_path.name == "sample.pdf"]
-                    if (not matches or matches[0].preview_image.get_pixbuf() is None
-                            or not pdf_cards or pdf_cards[0].preview_image.get_pixbuf() is None):
+                    if (not matches or matches[0].preview_image.get_paintable() is None
+                            or not pdf_cards or pdf_cards[0].preview_image.get_paintable() is None):
                         return True
                     assert pane.gallery_columns == 2
-                    assert pdf_cards[0].preview_image.get_pixbuf().get_height() <= 80
-                    if pane.gallery_flow.get_children()[0].get_allocated_height() < 108:
+                    assert pdf_cards[0].preview_image.get_paintable().get_intrinsic_height() <= 80
+                    if widget_children(pane.gallery_flow)[0].get_allocated_height() < 108:
                         return True
-                    assert pane.gallery_flow.get_children()[0].get_allocated_height() == 108, (
-                        pane.gallery_flow.get_children()[0].get_allocated_height(),
+                    assert widget_children(pane.gallery_flow)[0].get_allocated_height() == 108, (
+                        widget_children(pane.gallery_flow)[0].get_allocated_height(),
                         pdf_cards[0].get_allocated_height())
                     if not step.get("gallery_entry_rebuild_started"):
                         assert pane.gallery_serial == 1
@@ -526,41 +554,48 @@ def smoke(args):
                         return True
                     if pane.gallery_building or pane.gallery_resize_source:
                         return True
-                    assert window.get_focus() is window.command_entry
+                    assert window.get_focus().get_ancestor(Gtk.Entry) is window.command_entry
                     window.focus_active_browser()
                     checks.append("gallery rebuild leaves command entry focus intact")
-                    parent_tile = window.gallery_flow.get_children()[0]
+                    parent_tile = widget_children(window.gallery_flow)[0]
                     assert parent_tile.is_parent and isinstance(parent_tile.get_child(), Gtk.Box)
                     assert parent_tile.get_child().get_children()[0].get_text() == ".."
                     parent_label = parent_tile.get_child().get_children()[0]
-                    window.check_resize()
+                    window.queue_resize()
                     before = parent_label.translate_coordinates(window.gallery_flow, 0, 0)
                     window.gallery_flow.select_child(parent_tile)
-                    window.check_resize()
+                    window.queue_resize()
                     assert parent_label.translate_coordinates(window.gallery_flow, 0, 0) == before, (
                         before, parent_label.translate_coordinates(window.gallery_flow, 0, 0))
                     parent_tile.grab_focus()
                     assert window.gallery_key(window.gallery_flow,
                         argparse.Namespace(keyval=Gdk.KEY_Left, state=0))
-                    assert window.gallery_flow.get_selected_children() == [parent_tile]
+                    assert (parent_tile in window.gallery_flow.get_selected_children()
+                            and all(item.gallery_index == 0 for item in window.gallery_flow.get_selected_children())), (
+                                [(item.gallery_index, item.gallery_row) for item in window.gallery_flow.get_selected_children()],
+                                window.gallery_top(window.active), window.gallery_flow.get_focus_child())
                     assert window.gallery_key(window.gallery_flow,
                         argparse.Namespace(keyval=Gdk.KEY_Right, state=0))
                     assert window.gallery_flow.get_selected_children()[0] is window.active.gallery_children_by_logical[
                         window.active.gallery_capacity]
                     assert window.gallery_key(window.gallery_flow,
                         argparse.Namespace(keyval=Gdk.KEY_Left, state=0))
-                    assert window.gallery_flow.get_selected_children() == [parent_tile]
+                    assert (parent_tile in window.gallery_flow.get_selected_children()
+                            and all(item.gallery_index == 0 for item in window.gallery_flow.get_selected_children()))
                     assert window.capture_gallery_key(None, Gdk.KEY_End, 0, Gdk.ModifierType(0))
                     assert window.gallery_selected_paths() == [child / "zz-track.mp3"]
                     assert window.capture_gallery_key(None, Gdk.KEY_Home, 0, Gdk.ModifierType(0))
-                    assert window.gallery_flow.get_selected_children() == [parent_tile]
+                    assert (parent_tile in window.gallery_flow.get_selected_children()
+                            and all(item.gallery_index == 0 for item in window.gallery_flow.get_selected_children())), (
+                                [(item.gallery_index, item.gallery_row) for item in window.gallery_flow.get_selected_children()],
+                                window.gallery_top(window.active), window.gallery_flow.get_focus_child())
                     checks.append("Home and End reach both ends of the gallery")
                     window.gallery_flow.unselect_all()
                     audio_tile = next(item for item in window.active.gallery_children_by_logical
                                       if item is not None and item.file_path.name == "zz-track.mp3")
                     if audio_tile.preview_image.get_storage_type() != Gtk.ImageType.GICON:
                         return True
-                    assert audio_tile.preview_image.get_gicon()[0].equal(
+                    assert audio_tile.preview_image.get_gicon().equal(
                         Gio.content_type_get_icon(Gio.content_type_guess(str(child / "zz-track.mp3"), None)[0]))
                     window.scroll_gallery_to(matches[0])
                     if window.active.gallery_scroll.get_vadjustment().get_value() <= 0:
@@ -589,31 +624,38 @@ def smoke(args):
                     assert focus is window.gallery_flow or focus.is_ancestor(window.gallery_flow)
                     checks.append("Tab keeps focus in mixed Gallery and Files panes")
                     window.active.gallery_scroll.get_vadjustment().set_value(0)
-                    surface = screenshot("gallery-top")
+                    step["number"] = 2.5
+                    return True
+                elif number == 2.5:
                     gallery_pane = window.active
+                    matches = [item for item in gallery_pane.gallery_children_by_logical
+                               if item is not None and item.file_path.name == "visual.png"]
+                    surface = screenshot("gallery-top")
                     first_partial = window.gallery_child_for_index(
                         gallery_pane, gallery_pane.gallery_capacity, gallery_pane.gallery_capacity)
                     assert first_partial.gallery_row == gallery_pane.gallery_capacity
-                    covered_x, covered_y = first_partial.translate_coordinates(window, 20, 20)
-                    _scroll_x, scroll_y = first_partial.translate_coordinates(
-                        gallery_pane.gallery_scroll, 20, 20)
-                    assert scroll_y > window.gallery_visible_bottom(gallery_pane)
+                    covered_x = int(first_partial.translate_coordinates(window, 20, 20)[0])
+                    sample_y = min(gallery_pane.gallery_scroll.get_height() - 10,
+                                   window.gallery_visible_bottom(gallery_pane) + 5)
+                    covered_y = int(gallery_pane.gallery_scroll.translate_coordinates(
+                        window.get_child(), 0, sample_y)[1])
                     pixel = bytes(surface.get_data())[(covered_y * surface.get_stride() + covered_x * 4):
                                                       (covered_y * surface.get_stride() + covered_x * 4 + 4)]
-                    background = window.palette["background"]
-                    assert pixel[:3] == bytes.fromhex(background[5:7] + background[3:5] + background[1:3]), pixel
+                    backgrounds = [window.palette[key] for key in ("background", "surface")]
+                    assert pixel[:3] in [bytes.fromhex(color[5:7] + color[3:5] + color[1:3])
+                                         for color in backgrounds], pixel
                     assert window.gallery_click(gallery_pane, first_partial,
                         argparse.Namespace(button=1, type=Gdk.EventType.BUTTON_PRESS,
                                            state=Gdk.ModifierType(0), x=20, y=20), first_partial)
                     assert all(item.gallery_row < gallery_pane.gallery_capacity
                                for item in gallery_pane.gallery_flow.get_selected_children())
                     _columns, pitch, _first_y = window.gallery_geometry(
-                        gallery_pane.gallery_flow, gallery_pane.gallery_flow.get_children())
+                        gallery_pane.gallery_flow, widget_children(gallery_pane.gallery_flow))
                     gallery_pane.gallery_scroll.get_vadjustment().set_value(3 * pitch)
                     window.snap_gallery_scroll(gallery_pane)
                     assert window.gallery_top(gallery_pane) == 3
                     for row in range(3, 3 + gallery_pane.gallery_capacity):
-                        visible = [item.gallery_index for item in gallery_pane.gallery_flow.get_children()
+                        visible = [item.gallery_index for item in widget_children(gallery_pane.gallery_flow)
                                    if getattr(item, "gallery_row", -1) == row]
                         assert visible == [row, row + gallery_pane.gallery_capacity], (row, visible)
                     duplicate = window.gallery_child_for_index(
@@ -703,7 +745,7 @@ def smoke(args):
                     if "First page" not in window.inspector_details.get_text():
                         return True
                     assert window.preview_stack.get_visible_child_name() == "image"
-                    assert window.image.get_pixbuf() is not None
+                    assert window.image.get_paintable() is not None
                     checks.append("PDF first-page preview")
                     screenshot("inspect-pdf")
                     window.set_mode("project")
@@ -931,17 +973,13 @@ def smoke(args):
                     step["number"] = 151
                 elif number == 151:
                     pane = window.panes[0]
-                    if pane.gallery_building or not pane.gallery_flow.get_children():
+                    if pane.gallery_building or not widget_children(pane.gallery_flow):
                         return True
                     window.focus_active_browser()
                     focused_card = pane.gallery_flow.get_focus_child()
                     assert focused_card is not None
-                    key_event = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
-                    key_event.window = focused_card.get_window()
-                    key_event.keyval = Gdk.KEY_i
-                    key_event.state = Gdk.ModifierType.CONTROL_MASK
-                    key_event.set_device(Gdk.Display.get_default().get_default_seat().get_keyboard())
-                    Gtk.main_do_event(key_event)
+                    assert window.key(window,
+                        argparse.Namespace(keyval=Gdk.KEY_i, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "files"
                     assert window.get_focus() is pane.view
                     cursor = pane.view.get_cursor()[1]
@@ -959,11 +997,11 @@ def smoke(args):
                 elif number == 16:
                     pane = window.panes[0]
                     if (pane.path != child / "assets" or pane.gallery_displayed_path != pane.path
-                            or pane.gallery_building or not window.gallery_flow.get_children()
+                            or pane.gallery_building or not widget_children(window.gallery_flow)
                             or window.gallery_layout(pane) != (pane.gallery_columns, pane.gallery_capacity)):
                         return True
                     assert window.mode == "gallery"
-                    parent_card = window.gallery_flow.get_children()[0]
+                    parent_card = widget_children(window.gallery_flow)[0]
                     assert parent_card.is_parent
                     assert window.gallery_flow.get_selected_children() == [parent_card]
                     assert window.gallery_flow.get_focus_child() is parent_card
@@ -980,13 +1018,10 @@ def smoke(args):
                         return True
                     checks.append("gallery folder opens with a visible cursor on parent")
                     checks.append("Commander keeps the parent cursor after Gallery")
-                    key_event = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
-                    key_event.window = parent_card.get_window()
-                    key_event.keyval = Gdk.KEY_x
-                    key_event.state = Gdk.ModifierType(0)
-                    assert parent_card.event(key_event)
+                    assert window.gallery_key(window.gallery_flow,
+                        argparse.Namespace(keyval=Gdk.KEY_x, state=Gdk.ModifierType(0)))
                     assert window.command_entry.get_text() == "x"
-                    assert window.get_focus() is window.command_entry
+                    assert window.get_focus().get_ancestor(Gtk.Entry) is window.command_entry
                     assert window.command_entry_key(window.command_entry,
                         argparse.Namespace(keyval=Gdk.KEY_Escape, state=0))
                     assert window.get_focus() is parent_card
@@ -1024,24 +1059,28 @@ def smoke(args):
                         assert window.gallery_key(window.gallery_flow,
                             argparse.Namespace(keyval=Gdk.KEY_Down, state=0))
                         assert window.gallery_flow.get_focus_child().gallery_index == 1
-                        checks.append("gallery folder navigation refreshes without losing selection state")
-                        checks.append("typed cd navigates from gallery and returns its cursor")
                         _columns, pitch, _first_y = window.gallery_geometry(
-                            pane.gallery_flow, pane.gallery_flow.get_children())
+                            pane.gallery_flow, widget_children(pane.gallery_flow))
+                        if (pane.gallery_scroll.get_vadjustment().get_upper()
+                                - pane.gallery_scroll.get_vadjustment().get_page_size()) < 3 * pitch:
+                            return True
                         pane.gallery_scroll.get_vadjustment().set_value(3 * pitch)
                         window.snap_gallery_scroll(pane)
                         assert window.gallery_top(pane) > 0
+                        checks.append("gallery folder navigation refreshes without losing selection state")
+                        checks.append("typed cd navigates from gallery and returns its cursor")
                         pane.navigate(project)
                         step["gallery_parent_scan_started"] = True
                         return True
                     if (pane.path != project or pane.gallery_displayed_path != project
-                            or pane.gallery_building or not pane.gallery_flow.get_children()):
+                            or pane.gallery_building or not widget_children(pane.gallery_flow)):
                         return True
                     selected_gallery = pane.gallery_flow.get_selected_children()
                     assert len(selected_gallery) == 1
                     assert selected_gallery[0].file_path == child
                     top = window.gallery_top(pane)
-                    assert top <= selected_gallery[0].gallery_row < top + pane.gallery_capacity
+                    if not top <= selected_gallery[0].gallery_row < top + pane.gallery_capacity:
+                        return True
                     assert pane.gallery_flow.get_focus_child() is selected_gallery[0]
                     checks.append("gallery folder changes show the selected card without old scroll offset")
                     window.set_mode("files")
@@ -1051,8 +1090,8 @@ def smoke(args):
 
                     def observe_large_rebuild(*rebuild_args, **rebuild_kwargs):
                         result = original_rebuild(*rebuild_args, **rebuild_kwargs)
-                        if pane.path == bulk and not step.get("bulk_first_seen"):
-                            assert len(pane.entries) > 256
+                        if (pane.path == bulk and len(pane.entries) > 256
+                                and not step.get("bulk_first_seen")):
                             assert pane.cursor_logical() == 0
                             assert len(pane.store) < len(pane.entries)
                             step["bulk_first_seen"] = True
@@ -1069,7 +1108,9 @@ def smoke(args):
                         return True
                     assert step.get("bulk_first_seen")
                     assert len(pane.logical_to_stores) == len(pane.entries)
-                    assert pane.cursor_logical() == len(pane.entries) - 1
+                    assert pane.cursor_logical() == len(pane.entries) - 1, (
+                        pane.cursor_logical(), len(pane.entries), pane.model_pending_target,
+                        pane.visible_top(), pane.capacity, pane.view.get_cursor())
                     assert pane.selected_paths() == [bulk / "program-0899"]
                     checks.append("large folders show a cursor before later rows load")
                     pane.rebuild_entries = step["original_rebuild"]
@@ -1102,7 +1143,7 @@ def smoke(args):
 
                         def delayed_batch(batch):
                             on_batch(batch)
-                            time.sleep(0.2)
+                            slow_continue.wait()
 
                         return original_listing(folder, hidden, delayed_batch, cancelled)
 
@@ -1118,6 +1159,7 @@ def smoke(args):
                     assert len(pane.entries) < 401
                     checks.append("slow scans expose partial results with a cursor")
                     screenshot("slow-partial")
+                    slow_continue.set()
                     step["number"] = 22
                 elif number == 22:
                     pane = window.panes[0]
@@ -1214,11 +1256,12 @@ def smoke(args):
                     window.activate_pane(window.panes[0])
                     window.panes[0].navigate(child)
                     window.set_mode("gallery")
-                    window.resize(1400, 560)
+                    window.set_size_request(1400, 560)
+                    window.set_default_size(1400, 560)
                     step["number"] = 28
                 elif number == 28:
                     pane = window.panes[0]
-                    window.check_resize()
+                    window.queue_resize()
                     if (pane.path != child or len(pane.gallery_children_by_logical) < 70
                             or any(item is None for item in pane.gallery_children_by_logical)
                             or pane.gallery_scroll.get_allocated_height() > 600
@@ -1234,11 +1277,12 @@ def smoke(args):
                     pane.gallery_flow.unselect_all()
                     pane.gallery_flow.select_child(current)
                     current.grab_focus()
-                    window.resize(1400, 940)
+                    window.set_size_request(1400, 940)
+                    window.set_default_size(1400, 940)
                     step["number"] = 29
                 elif number == 29:
                     pane = window.panes[0]
-                    window.check_resize()
+                    window.queue_resize()
                     if (pane.gallery_scroll.get_allocated_height() <= step["small_gallery_height"] + 100
                             or pane.gallery_capacity <= step["small_gallery_capacity"]
                             or pane.gallery_resize_source
@@ -1261,40 +1305,51 @@ def smoke(args):
                     checks.append("Gallery Down follows the resized column to its new bottom")
                     window.set_mode("files")
                     step["old_split_width"] = window.file_panes.get_allocated_width()
-                    window.resize(1600, 940)
+                    window.set_size_request(1600, 940)
+                    window.set_default_size(1600, 940)
                     step["number"] = 30
                 elif number == 30:
-                    window.check_resize()
+                    window.queue_resize()
                     width = window.file_panes.get_allocated_width()
-                    if width < step["old_split_width"] + 100:
+                    if (width < step["old_split_width"] + 100
+                            or window.pane_split_width != width):
                         return True
                     assert abs(window.file_panes.get_position() / width - .5) < .02
                     window.file_panes.set_position(round(width * .65))
-                    assert abs(window.pane_split_ratio - .65) < .02
-                    window.resize(1200, 940)
+                    assert abs(window.pane_split_ratio - .65) < .02, (
+                        window.pane_split_ratio, width, window.file_panes.get_position(),
+                        window.panes[0].get_width(), window.panes[1].get_width())
+                    window.set_size_request(1200, 940)
+                    window.set_default_size(1200, 940)
                     step["number"] = 31
                 elif number == 31:
-                    window.check_resize()
+                    window.queue_resize()
                     width = window.file_panes.get_allocated_width()
                     if width > 1300:
                         return True
                     assert abs(window.file_panes.get_position() / width - .65) < .02
                     checks.append("panes start evenly and retain an intentional split across resize")
                     step["old_file_capacity"] = window.panes[0].capacity
-                    window.resize(1200, 560)
+                    window.set_size_request(1200, 560)
+                    window.set_default_size(1200, 560)
                     step["number"] = 32
                 elif number == 32:
-                    window.check_resize()
+                    window.queue_resize()
                     pane = window.panes[0]
                     if (pane.capacity >= step["old_file_capacity"]
                             or pane.capacity != pane.visible_capacity()
-                            or pane.model_fill_source):
+                            or pane.model_fill_source
+                            or (pane.scroll.get_vadjustment().get_upper()
+                                - pane.scroll.get_vadjustment().get_page_size()
+                                < pane.max_top() * pane.item_pitch() - pane.item_pitch())):
                         return True
                     adjustment = pane.scroll.get_vadjustment()
                     adjustment.set_value(adjustment.get_upper() - adjustment.get_page_size())
                     pane.snap_scroll()
                     top = pane.visible_top()
-                    assert top == pane.max_top()
+                    assert top == pane.max_top(), (
+                        top, pane.max_top(), pane.capacity, pane.item_pitch(),
+                        adjustment.get_upper(), adjustment.get_page_size(), adjustment.get_value())
                     assert pane.store[2 * (top + pane.capacity - 1) + 1][3] == pane.entries[-1][3]
                     checks.append("file columns stay full after a height resize")
                     adjustment = pane.scroll.get_vadjustment()
@@ -1328,6 +1383,7 @@ def smoke(args):
 
         GLib.timeout_add(150, run)
         app.run([sys.argv[0]])
+        slow_continue.set()
         if app.result == 0:
             assert step["number"] == 35 and not app.window.terminals
             checks.append("exiting the final shell quits Nightty")

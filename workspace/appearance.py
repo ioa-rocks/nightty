@@ -62,6 +62,7 @@ textview, textview text { background:$surface; color:$foreground; font-size:${ui
 entry.command-entry { background:transparent; border:0; box-shadow:none; padding:2px; }
 .pane-active { border-top:2px solid $accent; }
 .pane-inactive { border-top:2px solid $surface; }
+.file-split > separator { min-width:6px; background-image:linear-gradient(to right, $border 0%, $border 33%, $background 33%, $background 67%, $border 67%, $border 100%); }
 .inspector-details { background:$surface; border-left:1px solid $border; padding:18px; }
 .gallery-tile { background:$surface; border:1px solid $border; border-radius:3px; padding:8px; }
 flowboxchild { border:2px solid transparent; }
