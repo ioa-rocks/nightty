@@ -1166,8 +1166,7 @@ class Pane(Box):
         color = Gdk.RGBA()
         color.parse(self.window.palette["border"])
         context.set_source_rgba(color.red, color.green, color.blue, color.alpha)
-        x = (self.view.get_item_width() + 2 * self.view.get_item_padding()
-             + self.view.get_column_spacing() / 2)
+        x = widget.get_allocated_width() / 2
         context.rectangle(round(x), 0, 2, height)
         context.fill()
         return False
@@ -1186,6 +1185,7 @@ class Pane(Box):
         if self.view.get_item_width() != width:
             self.view.set_item_width(width)
             self.scroll.queue_draw()
+            self.scroll_overlay.drawing_area.queue_draw()
         if self.entries and self.visible_capacity() != self.capacity:
             self.rebuild_entries(preserve=True)
         return False
