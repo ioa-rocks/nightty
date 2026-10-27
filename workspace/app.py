@@ -2974,9 +2974,9 @@ class Window(Gtk.ApplicationWindow):
         connect_key(dialog, lambda _widget, event: (dialog.destroy(), True)[1]
                     if event.keyval == Gdk.KEY_Escape else False, capture=True)
         dialog.present()
-        destination_entry.grab_focus()
         if same_folder:
             destination_entry.select_region(len(str(sources[0].parent)) + 1, -1)
+        yes.grab_focus()
         return dialog
 
     def show_transfer_progress(self, job):
