@@ -393,7 +393,8 @@ class Pane(Box):
         self.view.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
         self.view.set_columns(2)
         self.view.set_item_width(300)
-        self.view.set_item_padding(1)
+        # Item padding adds a background-colored rim and enlarges every row.
+        self.view.set_item_padding(0)
         self.view.set_row_spacing(0)
         self.file_column_spacing = 2
         self.view.set_column_spacing(self.file_column_spacing)
@@ -4402,7 +4403,11 @@ class Window(Gtk.ApplicationWindow):
         tab_name = str(folder)
         title = Gtk.Label(label=tab_name)
         page = scrolled(terminal)
-        index = self.terminal_tabs.append_page(page, title)
+        insert_at = (self.current_workspace_tab.workspace_page_index + 1
+                     if self.current_workspace_tab is not None else len(self.terminals))
+        preceding_tab = (self.terminals[insert_at - 1][0].workspace_tab_group
+                         if insert_at else None)
+        index = self.terminal_tabs.insert_page(page, title, insert_at)
         page.show()
         title.show()
         terminal.workspace_page_index = index
@@ -4417,12 +4422,14 @@ class Window(Gtk.ApplicationWindow):
         close_button.set_tooltip_text(f"Close shell in {folder}")
         tab_group.pack_start(tab_button, False, False, 0)
         tab_group.pack_start(close_button, False, False, 0)
-        self.terminal_tab_bar.pack_start(tab_group, False, False, 0)
+        self.terminal_tab_bar.insert_child_after(tab_group, preceding_tab)
         tab_group.show()
         terminal.workspace_tab_button = tab_button
         terminal.workspace_tab_group = tab_group
         record = [terminal, 0]
-        self.terminals.append(record)
+        self.terminals.insert(index, record)
+        for number, (remaining, _pid) in enumerate(self.terminals):
+            remaining.workspace_page_index = number
         if self.current_workspace_tab is None:
             self.current_workspace_tab = terminal
 

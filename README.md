@@ -104,7 +104,9 @@ replacing them is follow-up work for GTK 5 readiness.
 `python3 -m workspace` launches at the default size unless given that option.
 
 Colors, font sizes and file name weight live in [appearance.json](appearance.json).
-The terminal shares the file list's family, pixel size and weight. The default
+The terminal uses the configured font family, pixel size and weight. The file
+list uses the same font with a quarter-pixel raster adjustment that preserves
+capital strokes without increasing row height. The default
 font is DejaVu Sans Mono at 26 pixels, regular weight, close to the font resolved
 from the operator's Kitty `monospace` setting at 20 points on a 96 DPI display.
 The palette matches the operator's MC skin through Kitty's Solarized colors:

@@ -138,7 +138,7 @@ def smoke(args, controls_only=False):
         (child / "0-日本語.txt").write_text("Japanese filename\n")
         for index in range(80):
             (child / f"note-{index:02}.txt").write_text(f"Note {index}\n")
-        (child / "note-15-日本語.txt").write_text("Japanese name in the right column\n")
+        (child / "note-16-日本語.txt").write_text("Japanese name in the right column\n")
         image = cairo.ImageSurface(cairo.FORMAT_ARGB32, 900, 480)
         drawing = cairo.Context(image)
         drawing.set_source_rgb(.12, .20, .29)
@@ -673,7 +673,7 @@ def smoke(args, controls_only=False):
                     assert row_rects[-2].y + pane.item_pitch() <= viewport
                     assert row_rects[-1].y + pane.item_pitch() > viewport
                     japanese_right = next(i for i, entry in enumerate(pane.entries)
-                                          if entry[1] == "note-15-日本語.txt")
+                                          if entry[1] == "note-16-日本語.txt")
                     assert pane.capacity <= japanese_right < 2 * pane.capacity
                     left_partner = pane.store_position(japanese_right - pane.capacity, 0)
                     left_path = Gtk.TreePath.new_from_indices([left_partner])
@@ -684,7 +684,7 @@ def smoke(args, controls_only=False):
                     assert pane.move_by_key(pane.view, argparse.Namespace(keyval=Gdk.KEY_Right, state=0))
                     assert pane.cursor_logical() == japanese_right
                     assert len(pane.view.get_selected_items()) == 1
-                    assert pane.selected_paths() == [child / "note-15-日本語.txt"]
+                    assert pane.selected_paths() == [child / "note-16-日本語.txt"]
                     assert pane.status_box.get_height() == footer_height
                     checks.append("Japanese filenames keep row height and one right-column cursor")
                     pane.view.unselect_all()

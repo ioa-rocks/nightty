@@ -70,7 +70,7 @@ entry { background:$surface; color:$foreground; border:1px solid $border; border
 treeview { background:$background; color:$foreground; font-family:'$family'; font-size:${files_px}px; outline-width:0; }
 treeview:selected { background:$accent; color:$accent_text; outline-width:0; }
 .pane-inactive treeview:selected { background:$surface; color:$subtle; outline-width:0; }
-iconview { background:$background; color:$foreground; font-family:'$family'; font-size:${files_px}px; font-weight:${files_weight}; outline-width:0; }
+iconview { background:$background; color:$foreground; font-family:'$family'; font-size:${file_text_px}px; font-weight:${files_weight}; outline-width:0; }
 iconview:selected { background:$accent; color:$accent_text; outline-width:0; }
 .pane-inactive iconview:selected { background:$surface; color:$subtle; outline-width:0; }
 treeview header button { background:$surface; color:$muted; border:0; border-radius:0; font-size:${small_px}px; }
@@ -132,10 +132,14 @@ def load_appearance(path=None):
 
 def stylesheet(appearance):
     fonts = appearance["fonts"]
+    # At the default 26px, GTK loses one scanline from capital top strokes.
+    # A quarter pixel restores it without increasing the file row's height.
+    file_text_px = fonts["files_px"] + 0.25
     dialog_sizes = {"dialog_title_px": max(fonts["heading_px"], fonts["ui_px"] + 6),
                     "dialog_message_px": fonts["ui_px"] + 4,
                     "dialog_detail_px": fonts["ui_px"] + 2,
                     "dialog_button_px": fonts["ui_px"] + 4}
     palette = {"marked": "#b58900",
                "dialog_background": appearance["palette"].get("dialog_background", appearance["palette"]["background"])}
-    return CSS.substitute(palette | appearance["palette"] | fonts | dialog_sizes).encode()
+    return CSS.substitute(palette | appearance["palette"] | fonts | dialog_sizes |
+                          {"file_text_px": file_text_px}).encode()

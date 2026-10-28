@@ -19,7 +19,8 @@ def main():
     source = Path(__file__).resolve().parent
     launcher = Path.home() / ".local/bin/nightty"
     desktop = Path.home() / ".local/share/applications/pw.blackbird.SurfaceWorkspace.desktop"
-    owned_desktop = desktop.exists() and "X-Surface-Workspace=true" in desktop.read_text()
+    desktop_text = desktop.read_text() if desktop.exists() else ""
+    owned_desktop = "X-Surface-Workspace=true" in desktop_text
     if desktop.exists() and not owned_desktop:
         raise SystemExit("An unrelated desktop entry already exists")
     command = shlex.quote(str(source / "run.sh"))
@@ -27,11 +28,18 @@ def main():
     expected = "#!/bin/sh\nexec " + command + ' --toggle "$@"\n'
     allowed_launchers = {previous, expected}
     if owned_desktop:
-        old_command = shlex.quote(str(source.with_name("Workspace") / "run.sh"))
-        allowed_launchers.update({
-            "#!/bin/sh\nexec " + old_command + ' "$@"\n',
-            "#!/bin/sh\nexec " + old_command + ' --toggle "$@"\n',
-        })
+        previous_sources = {source.with_name("Workspace")}
+        for line in desktop_text.splitlines():
+            if line.startswith("Icon="):
+                icon = Path(line.removeprefix("Icon="))
+                if icon.name in {"nightty-icon.png", "nightty-icon-constellation.png"}:
+                    previous_sources.add(icon.parent.parent)
+        for previous_source in previous_sources:
+            old_command = shlex.quote(str(previous_source / "run.sh"))
+            allowed_launchers.update({
+                "#!/bin/sh\nexec " + old_command + ' "$@"\n',
+                "#!/bin/sh\nexec " + old_command + ' --toggle "$@"\n',
+            })
     if launcher.exists() and launcher.read_text() not in allowed_launchers:
         raise SystemExit(f"Existing launcher left unchanged: {launcher}")
     launcher.parent.mkdir(parents=True, exist_ok=True)
