@@ -1336,8 +1336,8 @@ def run_smoke(args, controls_only=False):
                     assert pane.view.path_is_selected(pane.view.get_cursor()[1])
                     step["bin_loaded_seconds"] = round(time.monotonic() - step["bin_started"], 2)
                     checks.append("/bin finishes loading without losing navigation")
-                    from workspace import app as app_module
-                    original_listing = app_module.directory_entries
+                    from workspace import pane as pane_module
+                    original_listing = pane_module.directory_entries
 
                     def delayed_listing(folder, hidden=False, on_batch=None, cancelled=None,
                                         include_created=False):
@@ -1350,7 +1350,7 @@ def run_smoke(args, controls_only=False):
 
                         return original_listing(folder, hidden, delayed_batch, cancelled, include_created)
 
-                    app_module.directory_entries = delayed_listing
+                    pane_module.directory_entries = delayed_listing
                     window.panes[0].navigate(slow)
                     step["number"] = 21
                 elif number == 21:
