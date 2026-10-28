@@ -278,7 +278,8 @@ search again; Escape or Close returns to the original folder. This search finds
 `python3 -m unittest discover -s tests -v` verifies metadata inheritance,
 navigation state, copy and move cancellation/no-clobber, deletion abort and
 symlink handling, live and indexed filename search, and the loopback-only agent client.
-`./run.sh --smoke --state /tmp/workspace-smoke-state`
+`python3 -m tests.smoke --state /tmp/workspace-smoke-state`, run from the
+repository root,
 uses disposable files and fake agents, exercises native navigation, preview,
 copying and terminal output, and saves screenshots under `/tmp/`.
 
