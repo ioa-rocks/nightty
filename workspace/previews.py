@@ -88,4 +88,3 @@ def read_preview(path, width, height):
         return "text", result, "\n".join(details)
     except Exception as exc:
         return "text", f"Preview unavailable: {exc}\n\nPress F4 to open it in its application.", "\n".join(details)
-
