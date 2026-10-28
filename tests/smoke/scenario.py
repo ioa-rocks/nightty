@@ -277,7 +277,7 @@ def run_smoke(args, controls_only=False):
                     checks.append("popup keys follow Sort, View, Favourites order")
                     menu.popdown()
                     pane.focus_file_path(child / "draft.md")
-                    dialog = window.copy()
+                    dialog = window.operations.copy()
                     assert isinstance(dialog, Gtk.Window)
                     step["copy_dialog"] = dialog
                     step["number"] = 42
@@ -301,7 +301,7 @@ def run_smoke(args, controls_only=False):
                     assert choices[1].has_css_class("mc-dialog-focused")
                     dialog.destroy()
                     checks.append("copy dialog focus fill follows the selected action")
-                    step["same_folder_dialog"] = window.copy(same_folder=True)
+                    step["same_folder_dialog"] = window.operations.copy(same_folder=True)
                     step["number"] = 44
                     return True
                 if controls_only and step["number"] in {44, 45}:
@@ -321,13 +321,13 @@ def run_smoke(args, controls_only=False):
                         assert error.get_visible() and error.get_text() == "Enter a destination."
                     dialog.destroy()
                     if step["number"] == 44:
-                        step["same_folder_dialog"] = window.move(same_folder=True)
+                        step["same_folder_dialog"] = window.operations.move(same_folder=True)
                         step["number"] = 45
                         return True
                     checks.append("same-folder copy and rename focus the selected destination filename; Enter runs Yes")
-                    job = window.start_transfer([child / "draft.md"], output, background=False)
+                    job = window.operations.start_transfer([child / "draft.md"], output, background=False)
                     step["foreground_job"] = job
-                    step["foreground_dialog"] = window.show_transfer_progress(job)
+                    step["foreground_dialog"] = window.operations.show_transfer_progress(job)
                     step["number"] = 46
                     return True
                 if controls_only and step["number"] == 46:
@@ -337,9 +337,9 @@ def run_smoke(args, controls_only=False):
                         return True
                     assert (output / "draft.md").read_bytes() == (child / "draft.md").read_bytes()
                     checks.append("successful foreground copy closes its progress dialog")
-                    job = window.start_transfer([child / "draft.md"], output, background=False)
+                    job = window.operations.start_transfer([child / "draft.md"], output, background=False)
                     step["foreground_job"] = job
-                    step["foreground_dialog"] = window.show_transfer_progress(job)
+                    step["foreground_dialog"] = window.operations.show_transfer_progress(job)
                     step["number"] = 47
                     return True
                 if controls_only and step["number"] == 47:
@@ -364,7 +364,7 @@ def run_smoke(args, controls_only=False):
                     assert job.skipped == 1
                     assert (output / "draft.md").read_bytes() == (child / "draft.md").read_bytes()
                     checks.append("foreground conflict offers MC overwrite choices and No skips one file")
-                    step["background_job"] = window.start_transfer(
+                    step["background_job"] = window.operations.start_transfer(
                         [child / "draft.md"], output, background=True)
                     step["number"] = 49
                     return True
@@ -373,9 +373,9 @@ def run_smoke(args, controls_only=False):
                     if job.status in {"queued", "copying"}:
                         return True
                     assert job.status == "conflict" and job.conflict is not None
-                    window.update_transfers()
-                    assert window.transfers_button.has_css_class("transfer-alert")
-                    window.show_jobs()
+                    window.operations.update()
+                    assert window.operations.button.has_css_class("transfer-alert")
+                    window.operations.show_jobs()
                     choices = [choice for row in widget_children(job.conflict_dialog.get_child())[2:]
                                for choice in widget_children(row)]
                     choices[5].emit("clicked")
@@ -386,8 +386,8 @@ def run_smoke(args, controls_only=False):
                     if job.status != "completed":
                         return True
                     assert job.skipped == 1
-                    window.update_transfers()
-                    assert not window.transfers_button.has_css_class("transfer-alert")
+                    window.operations.update()
+                    assert not window.operations.button.has_css_class("transfer-alert")
                     checks.append("background conflict alerts in Transfers and Size differs skips equal files")
                     pane = window.panes[0]
                     pane.navigate(child)
@@ -481,7 +481,7 @@ def run_smoke(args, controls_only=False):
                         Gdk.ModifierType.SHIFT_MASK)
                     assert window.active is window.panes[0]
                     assert window.get_focus() is window.panes[0].view
-                    window.transfers_button.grab_focus()
+                    window.operations.button.grab_focus()
                     assert window.capture_browser_key(None, Gdk.KEY_Tab, 0, Gdk.ModifierType(0))
                     assert window.active is window.panes[1]
                     assert window.get_focus() is window.panes[1].view
@@ -596,8 +596,8 @@ def run_smoke(args, controls_only=False):
                     pane.move_by_key(pane.view, argparse.Namespace(keyval=Gdk.KEY_Right, state=0))
                     assert pane.cursor_logical() == len(pane.entries) - 1
                     pane.view.set_cursor(Gtk.TreePath.new_from_indices([pane.store_position(0, 0)]), None, False)
-                    window.transfers_button.grab_focus()
-                    assert window.browser_arrow_from_control(window.transfers_button,
+                    window.operations.button.grab_focus()
+                    assert window.browser_arrow_from_control(window.operations.button,
                         argparse.Namespace(keyval=Gdk.KEY_Right, state=0))
                     assert pane.cursor_logical() == pane.capacity, (pane.cursor_logical(), pane.capacity,
                                                                    pane.view.has_focus(), window.active.index)
@@ -642,7 +642,7 @@ def run_smoke(args, controls_only=False):
                     assert window.active is right and right.cursor_logical() == len(right.entries) - 1
                     window.activate_pane(pane)
                     checks.append("blank panel space focuses the nearest file")
-                    window.transfers_button.grab_focus()
+                    window.operations.button.grab_focus()
                     assert window.capture_browser_key(None, Gdk.KEY_End, 0, Gdk.ModifierType(0))
                     assert pane.cursor_logical() == len(pane.entries) - 1
                     assert window.capture_browser_key(None, Gdk.KEY_Home, 0, Gdk.ModifierType(0))
@@ -870,8 +870,8 @@ def run_smoke(args, controls_only=False):
                     window.gallery_flow.unselect_all()
                     window.gallery_flow.select_child(left_bottom)
                     left_bottom.grab_focus()
-                    window.transfers_button.grab_focus()
-                    assert window.browser_arrow_from_control(window.transfers_button,
+                    window.operations.button.grab_focus()
+                    assert window.browser_arrow_from_control(window.operations.button,
                         argparse.Namespace(keyval=Gdk.KEY_Right, state=0))
                     assert window.active.gallery.selected_paths() == [child / "zz-track.mp3"]
                     assert window.active is window.panes[0]
@@ -894,7 +894,7 @@ def run_smoke(args, controls_only=False):
                     assert opened == [child / "visual.png", child / "visual.png"]
                     assert window.mode == "gallery"
                     checks.append("Enter opens the default application in Files and Gallery")
-                    window.job = window.start_copy(window.active.gallery.selected_paths(), output)
+                    window.job = window.operations.start_copy(window.active.gallery.selected_paths(), output)
                     assert window.key(window, argparse.Namespace(keyval=Gdk.KEY_F3, state=0))
                     step["number"] = 3
                 elif number == 3:
@@ -972,10 +972,10 @@ def run_smoke(args, controls_only=False):
                     assert window.top_tab_shortcut("Page_Down", Gdk.ModifierType.CONTROL_MASK)
                     assert window.mode == "files" and window.terminal_tabs.get_current_page() == 1
                     checks.append("Ctrl+PageUp and Ctrl+PageDown retain each tab's view")
-                    window.show_jobs()
-                    assert window.transfer_popover.get_visible()
-                    assert "COMPLETED" in window.jobs_label.get_text()
-                    window.show_jobs()
+                    window.operations.show_jobs()
+                    assert window.operations.popover.get_visible()
+                    assert "COMPLETED" in window.operations.jobs_label.get_text()
+                    window.operations.show_jobs()
                     checks.append("transfers open in a compact dropdown")
                     window.set_mode("project")
                     window.project_tabs.set_current_page(2)
@@ -1624,7 +1624,7 @@ def run_smoke(args, controls_only=False):
         app.run([sys.argv[0]])
         slow_continue.set()
         if app.window is not None:
-            for job in app.window.jobs:
+            for job in app.window.operations.jobs:
                 job.cancel.set()
         if app.result == 0:
             if controls_only:
