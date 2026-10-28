@@ -104,23 +104,23 @@ def run_smoke(args, controls_only=False):
                 if step["number"] == 0 and not step.get("startup_checked"):
                     assert window.mode == "console"
                     assert window.stack.get_visible_child_name() == "console"
-                    assert len(window.terminals) == 1
-                    assert len(window.terminal_tab_bar.get_children()) == 1
-                    assert not window.terminal_tabs.get_show_tabs()
-                    assert window.terminals[0][0].workspace_tab_button.has_css_class("top-tab-active")
+                    assert len(window.shells.terminals) == 1
+                    assert len(window.shells.tab_bar.get_children()) == 1
+                    assert not window.shells.notebook.get_show_tabs()
+                    assert window.shells.terminals[0][0].workspace_tab_button.has_css_class("top-tab-active")
                     assert window.file_panes is None and not window.panes
                     assert window.gallery_flow is None
                     assert not hasattr(window, "regime_button")
-                    assert window.terminals[0][0].workspace_tab_button.get_label() == str(child)
-                    assert window.terminals[0][0].workspace_tab_button.get_child().get_max_width_chars() == 24
-                    terminal_font = window.terminals[0][0].get_font()
+                    assert window.shells.terminals[0][0].workspace_tab_button.get_label() == str(child)
+                    assert window.shells.terminals[0][0].workspace_tab_button.get_child().get_max_width_chars() == 24
+                    terminal_font = window.shells.terminals[0][0].get_font()
                     assert terminal_font.get_size_is_absolute()
                     assert terminal_font.get_size() == window.appearance["fonts"]["files_px"] * Pango.SCALE
                     assert terminal_font.get_weight() == window.appearance["fonts"]["files_weight"]
                     checks.append("shell startup leaves Files and Gallery unloaded")
                     screenshot("terminal-start")
-                    assert window.get_focus() is window.terminals[0][0]
-                    assert window.terminal_shortcut(window.terminals[0][0],
+                    assert window.get_focus() is window.shells.terminals[0][0]
+                    assert window.shells.terminal_shortcut(window.shells.terminals[0][0],
                         argparse.Namespace(keyval=Gdk.KEY_o, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "files"
                     assert window.file_panes is not None and len(window.panes) == 2
@@ -931,46 +931,46 @@ def run_smoke(args, controls_only=False):
                     screenshot("inspect-pdf")
                     window.set_mode("project")
                     screenshot("project")
-                    window.new_terminal(command=["/bin/sh", "-c", "printf 'SURFACE_TERMINAL_OK\\n'; exec /bin/sh"])
+                    window.shells.new(command=["/bin/sh", "-c", "printf 'SURFACE_TERMINAL_OK\\n'; exec /bin/sh"])
                     window.set_mode("console")
                     step["number"] = 6
                 elif number == 6:
-                    terminal = window.terminals[-1][0]
+                    terminal = window.shells.terminals[-1][0]
                     text = terminal.get_text_format(Vte.Format.TEXT) or ""
                     if "SURFACE_TERMINAL_OK" not in [line.strip() for line in text.splitlines()]:
                         return True
-                    shell_tab = window.terminals[1][0]
+                    shell_tab = window.shells.terminals[1][0]
                     shell_tab.workspace_browser["paths"] = (bulk, output)
                     generation = tuple(pane.generation for pane in window.panes)
-                    window.select_terminal(0)
-                    window.select_terminal(1)
+                    window.shells.select(0)
+                    window.shells.select(1)
                     assert tuple(pane.generation for pane in window.panes) == generation
                     assert window.panes[0].path == child
                     shell_tab.workspace_browser["paths"] = (child, output)
                     checks.append("shell tabs do not scan unopened file views")
                     window.hide()
-                    assert any(pid for _terminal, pid in window.terminals)
+                    assert any(pid for _terminal, pid in window.shells.terminals)
                     app.activate()
                     assert window.get_visible()
                     checks.extend(["embedded terminal output", "hide preserves process"])
                     screenshot("console")
-                    assert len(window.terminals) == 2
-                    assert window.top_tab_shortcut("Page_Up", Gdk.ModifierType.CONTROL_MASK)
-                    assert window.mode == "project" and window.terminal_tabs.get_current_page() == 0
-                    assert window.top_tab_shortcut("Page_Down", Gdk.ModifierType.CONTROL_MASK)
-                    assert window.mode == "console" and window.terminal_tabs.get_current_page() == 1
-                    assert window.terminal_shortcut(terminal,
+                    assert len(window.shells.terminals) == 2
+                    assert window.shells.top_tab_shortcut("Page_Up", Gdk.ModifierType.CONTROL_MASK)
+                    assert window.mode == "project" and window.shells.notebook.get_current_page() == 0
+                    assert window.shells.top_tab_shortcut("Page_Down", Gdk.ModifierType.CONTROL_MASK)
+                    assert window.mode == "console" and window.shells.notebook.get_current_page() == 1
+                    assert window.shells.terminal_shortcut(terminal,
                         argparse.Namespace(keyval=Gdk.KEY_2, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "project"
-                    assert window.terminal_shortcut(terminal,
+                    assert window.shells.terminal_shortcut(terminal,
                         argparse.Namespace(keyval=Gdk.KEY_3, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "console"
                     checks.append("idle shell shortcuts open native views directly")
                     window.set_mode("files")
-                    assert window.top_tab_shortcut("Page_Up", Gdk.ModifierType.CONTROL_MASK)
+                    assert window.shells.top_tab_shortcut("Page_Up", Gdk.ModifierType.CONTROL_MASK)
                     assert window.mode == "project"
-                    assert window.top_tab_shortcut("Page_Down", Gdk.ModifierType.CONTROL_MASK)
-                    assert window.mode == "files" and window.terminal_tabs.get_current_page() == 1
+                    assert window.shells.top_tab_shortcut("Page_Down", Gdk.ModifierType.CONTROL_MASK)
+                    assert window.mode == "files" and window.shells.notebook.get_current_page() == 1
                     checks.append("Ctrl+PageUp and Ctrl+PageDown retain each tab's view")
                     window.operations.show_jobs()
                     assert window.operations.popover.get_visible()
@@ -1076,7 +1076,7 @@ def run_smoke(args, controls_only=False):
                         return True
                     assert "cd --" not in terminal_text
                     screenshot("command-output")
-                    assert window.terminal_shortcut(terminal,
+                    assert window.shells.terminal_shortcut(terminal,
                         argparse.Namespace(keyval=Gdk.KEY_o, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "files"
                     assert window.command_row.get_visible()
@@ -1096,7 +1096,7 @@ def run_smoke(args, controls_only=False):
                     assert window.key(window,
                         argparse.Namespace(keyval=Gdk.KEY_p, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "console"
-                    assert window.terminal_shortcut(terminal,
+                    assert window.shells.terminal_shortcut(terminal,
                         argparse.Namespace(keyval=Gdk.KEY_p,
                                            state=Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK))
                     terminal.feed_child(b"\x15")
@@ -1379,17 +1379,17 @@ def run_smoke(args, controls_only=False):
                     pane = window.panes[0]
                     if pane.path != bulk or "loading" in pane.count.get_text().lower():
                         return True
-                    if not window.terminals[0][0].workspace_ready:
+                    if not window.shells.terminals[0][0].workspace_ready:
                         return True
                     assert pane.cursor_logical() is not None
                     checks.append("typed cd validates unknown folders off the GTK thread")
-                    window.select_terminal(0)
-                    assert window.current_workspace_tab.workspace_browser["paths"][0] == child
+                    window.shells.select(0)
+                    assert window.shells.current.workspace_browser["paths"][0] == child
                     assert window.project_context_path == child
-                    window.select_terminal(1)
+                    window.shells.select(1)
                     assert window.panes[0].path == bulk
                     checks.append("workspace tabs retain independent browser folders")
-                    tab = window.terminals[1][0]
+                    tab = window.shells.terminals[1][0]
                     folder = child / "assets"
                     shell_folder = tab.workspace_cwd
                     pending = len(tab.workspace_pending)
@@ -1405,45 +1405,45 @@ def run_smoke(args, controls_only=False):
                     assert len(tab.workspace_pending) == pending
                     assert tab.workspace_cwd == shell_folder
                     checks.append("browser navigation never sends cd from Files or Gallery")
-                    window.select_terminal(0)
+                    window.shells.select(0)
                     window.set_mode("console")
-                    shell = window.terminals[0][0]
+                    shell = window.shells.terminals[0][0]
                     shell.feed_child(b"sleep 2\n")
                     step["number"] = 24
                 elif number == 24:
-                    shell = window.terminals[0][0]
-                    if not window.terminal_has_foreground_program(shell):
+                    shell = window.shells.terminals[0][0]
+                    if not window.shells.has_foreground_program(shell):
                         return True
-                    assert not window.terminal_shortcut(shell,
+                    assert not window.shells.terminal_shortcut(shell,
                         argparse.Namespace(keyval=Gdk.KEY_o, state=Gdk.ModifierType.CONTROL_MASK))
                     assert not window.key(window,
                         argparse.Namespace(keyval=Gdk.KEY_p, state=Gdk.ModifierType.CONTROL_MASK))
-                    assert not window.terminal_shortcut(shell,
+                    assert not window.shells.terminal_shortcut(shell,
                         argparse.Namespace(keyval=Gdk.KEY_p, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "console"
                     checks.append("Ctrl+O and Ctrl+P reach foreground terminal programs")
                     step["number"] = 25
                 elif number == 25:
-                    shell = window.terminals[0][0]
-                    if window.terminal_has_foreground_program(shell):
+                    shell = window.shells.terminals[0][0]
+                    if window.shells.has_foreground_program(shell):
                         return True
-                    assert window.terminal_shortcut(shell,
+                    assert window.shells.terminal_shortcut(shell,
                         argparse.Namespace(keyval=Gdk.KEY_o, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "project"
                     checks.append("Ctrl+O switches Nightty views at the shell prompt")
-                    assert window.terminal_shortcut(shell,
+                    assert window.shells.terminal_shortcut(shell,
                         argparse.Namespace(keyval=Gdk.KEY_o,
                                            state=Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK))
                     assert window.mode == "project"
                     checks.append("Ctrl+Shift+O sends a literal key to the terminal")
-                    assert window.terminal_shortcut(shell,
+                    assert window.shells.terminal_shortcut(shell,
                         argparse.Namespace(keyval=Gdk.KEY_Return, state=Gdk.ModifierType.CONTROL_MASK))
-                    assert window.terminal_shortcut(shell,
+                    assert window.shells.terminal_shortcut(shell,
                         argparse.Namespace(keyval=Gdk.KEY_Return, state=Gdk.ModifierType.SHIFT_MASK))
                     assert shell.get_allow_hyperlink()
                     assert shell.workspace_url_tag >= 0 and shell.workspace_path_tag >= 0
                     checks.append("Ctrl+Enter and Shift+Enter reach the shell as newlines; terminal links register")
-                    step["short_tab"] = window.new_terminal(command=["/bin/sh", "-c", "cd /; exec /bin/sh"])
+                    step["short_tab"] = window.shells.new(command=["/bin/sh", "-c", "cd /; exec /bin/sh"])
                     step["number"] = 26
                 elif number == 26:
                     short_tab = step["short_tab"]
@@ -1455,10 +1455,10 @@ def run_smoke(args, controls_only=False):
                     step["number"] = 27
                 elif number == 27:
                     short_tab = step["short_tab"]
-                    if short_tab in [terminal for terminal, _pid in window.terminals]:
+                    if short_tab in [terminal for terminal, _pid in window.shells.terminals]:
                         return True
-                    assert len(window.terminals) == 2
-                    assert window.current_workspace_tab is window.terminals[1][0]
+                    assert len(window.shells.terminals) == 2
+                    assert window.shells.current is window.shells.terminals[1][0]
                     checks.append("exiting shell tabs close without changing other tabs")
                     window.activate_pane(window.panes[0])
                     window.panes[0].navigate(child)
@@ -1565,7 +1565,7 @@ def run_smoke(args, controls_only=False):
                     screenshot("row-boundary")
                     step["number"] = 33
                 elif number == 33:
-                    assert len(window.terminals) == 2
+                    assert len(window.shells.terminals) == 2
                     step["row_geometry"] = {"top_inset": window.panes[0].top_inset,
                                             "pitch": window.panes[0].row_pitch,
                                             "capacity": window.panes[0].capacity}
@@ -1602,13 +1602,13 @@ def run_smoke(args, controls_only=False):
                     assert any("Gallery" in item.get_label() for item in menu.nightty_items)
                     menu.popdown()
                     checks.append("Ctrl+F1 then Left reaches View; sort reverses and preserves selection")
-                    window.terminals[0][0].feed_child(b"exit\n")
+                    window.shells.terminals[0][0].feed_child(b"exit\n")
                     step["number"] = 34
                 elif number == 34:
-                    if len(window.terminals) != 1:
+                    if len(window.shells.terminals) != 1:
                         return True
                     checks.append("exiting a nonfinal shell keeps Nightty open")
-                    window.terminals[0][0].feed_child(b"exit\n")
+                    window.shells.terminals[0][0].feed_child(b"exit\n")
                     step["number"] = 35
                 elif number == 35:
                     return True
@@ -1634,7 +1634,7 @@ def run_smoke(args, controls_only=False):
                                                   "/tmp/workspace-files-controls.png",
                                                   "/tmp/workspace-rapid-up-root.png"]}), flush=True)
             else:
-                assert step["number"] == 35 and not app.window.terminals
+                assert step["number"] == 35 and not app.window.shells.terminals
                 checks.append("exiting the final shell quits Nightty")
                 print(json.dumps({"checks": checks,
                     "bin_loaded_seconds": step["bin_loaded_seconds"],

@@ -7,12 +7,9 @@ from datetime import datetime
 import os
 from pathlib import Path
 import queue
-import re
 import shlex
-import signal
 import socket
 import stat
-from urllib.parse import urlsplit
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -27,8 +24,9 @@ from .model import context_for
 from .pane import Pane
 from .previews import format_size, read_preview
 from .search import SearchCancelled, find_names
+from .shells import ShellTabs
 from .transfers import FileOperations
-from .widgets import (Box, button, confirm, connect_click, connect_key, dialog_button,
+from .widgets import (Box, button, confirm, connect_key, dialog_button,
                       label, on_resize, scrolled, text_has_focus, textview,
                       widget_children)
 
@@ -50,8 +48,8 @@ class Window(Gtk.ApplicationWindow):
         self.pool = ThreadPoolExecutor(max_workers=6, thread_name_prefix="surface-io")
         self.listing_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="surface-listing")
         self.thumbnails_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="surface-thumbnails")
-        self.terminals = []
         self.operations = FileOperations(self)
+        self.shells = ShellTabs(self)
         self.context, self.context_serial, self.preview_serial = None, 0, 0
         self.project_context_path = None
         self.selection, self.mode = None, "files"
@@ -65,9 +63,6 @@ class Window(Gtk.ApplicationWindow):
         self.command_refresh_pending = False
         self.output_return_mode = "files"
         self.project_return_mode = "files"
-        self.terminal_sequence = 0
-        self.current_workspace_tab = None
-        self.restoring_workspace_tab = False
         self.set_default_size(1400, 900)
         self.set_size_request(1500 if getattr(args, "smoke", False) else 760,
                               900 if getattr(args, "smoke", False) else 500)
@@ -88,11 +83,10 @@ class Window(Gtk.ApplicationWindow):
         header = Gtk.HeaderBar(show_title_buttons=True)
         header.set_title_widget(Gtk.Label(label="Nightty"))
         self.tab_bar = Box(spacing=0)
-        self.terminal_tab_bar = Box(spacing=0)
-        self.tab_bar.pack_start(self.terminal_tab_bar, False, False, 0)
+        self.tab_bar.pack_start(self.shells.tab_bar, False, False, 0)
         header.pack_start(self.tab_bar)
         header.pack_end(self.operations.button)
-        add_tab = button("+ Tab", self.new_terminal)
+        add_tab = button("+ Tab", self.shells.new)
         add_tab.set_tooltip_text("New shell tab · Ctrl+Shift+T")
         header.pack_end(add_tab)
         self.workspace_button = button("Shell ▾", self.show_workspace_menu)
@@ -120,7 +114,6 @@ class Window(Gtk.ApplicationWindow):
         self.pane_split_ratio = .5
         self.pane_split_width = 0
         self.pane_split_updating = False
-        self.browser_state_tab = None
         self.gallery_flow = None
 
         project = Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -174,10 +167,7 @@ class Window(Gtk.ApplicationWindow):
         self.stack.add_named(inspector, "inspect")
 
         self.terminal_box = Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.terminal_tabs = Gtk.Notebook(scrollable=True)
-        self.terminal_tabs.set_show_tabs(False)
-        self.terminal_tabs.connect("switch-page", self.terminal_page_changed)
-        self.terminal_box.pack_start(self.terminal_tabs, True, True, 0)
+        self.terminal_box.pack_start(self.shells.notebook, True, True, 0)
         self.stack.add_named(self.terminal_box, "console")
 
         self.info_box = Box()
@@ -211,7 +201,7 @@ class Window(Gtk.ApplicationWindow):
     def ensure_browser(self):
         if self.file_panes is not None:
             return
-        browser = (self.current_workspace_tab.workspace_browser if self.current_workspace_tab is not None
+        browser = (self.shells.current.workspace_browser if self.shells.current is not None
                    else self.initial_browser_state)
         file_panes = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         file_panes.set_wide_handle(True)
@@ -227,7 +217,7 @@ class Window(Gtk.ApplicationWindow):
         for pane in self.panes:
             self.footer_height_group.add_widget(pane.status_box)
         self.active = self.panes[browser["active"]]
-        self.browser_state_tab = self.current_workspace_tab
+        self.shells.browser_state_tab = self.shells.current
         file_panes.set_start_child(self.panes[0])
         file_panes.set_resize_start_child(True)
         file_panes.set_shrink_start_child(True)
@@ -357,8 +347,8 @@ class Window(Gtk.ApplicationWindow):
         if changed and self.mode in {"files", "gallery"}:
             self.mode = pane.content_stack.get_visible_child_name()
             self.state.save(mode=self.mode)
-            if self.current_workspace_tab is not None and not self.restoring_workspace_tab:
-                self.current_workspace_tab.workspace_mode = self.mode
+            if self.shells.current is not None and not self.shells.restoring:
+                self.shells.current.workspace_mode = self.mode
             if self.mode == "gallery":
                 self.gallery_flow = pane.gallery.flow
             self.refresh_mode_buttons()
@@ -381,17 +371,17 @@ class Window(Gtk.ApplicationWindow):
             self.mode, "Commander ▾")
         if self.workspace_button.get_label() != mode_label:
             self.workspace_button.set_label(mode_label)
-        for terminal, _pid in self.terminals:
+        for terminal, _pid in self.shells.terminals:
             control = getattr(terminal, "workspace_tab_button", None)
             if control is None:
                 continue
             mode = (self.inspector_return_mode if self.mode == "inspect" else self.mode
-                    ) if terminal is self.current_workspace_tab else terminal.workspace_mode
+                    ) if terminal is self.shells.current else terminal.workspace_mode
             if mode == "console":
-                self.update_shell_cwd(terminal)
+                self.shells.update_cwd(terminal)
                 folder = terminal.workspace_cwd
-            elif (terminal is self.current_workspace_tab and self.active is not None
-                  and self.browser_state_tab is terminal):
+            elif (terminal is self.shells.current and self.active is not None
+                  and self.shells.browser_state_tab is terminal):
                 folder = self.active.path
             else:
                 browser = terminal.workspace_browser
@@ -403,86 +393,11 @@ class Window(Gtk.ApplicationWindow):
             control.get_child().set_max_width_chars(24)
             control.set_tooltip_text(str(folder))
             css = control.get_style_context()
-            css.add_class("top-tab-active") if terminal is self.current_workspace_tab else css.remove_class("top-tab-active")
+            css.add_class("top-tab-active") if terminal is self.shells.current else css.remove_class("top-tab-active")
 
     def refresh_tab_paths(self):
         if self.get_visible():
             self.refresh_mode_buttons()
-        return True
-
-    def terminal_page_changed(self, _notebook, _page, _number):
-        self.refresh_mode_buttons()
-
-    def select_terminal(self, index):
-        if index < 0 or index >= len(self.terminals):
-            return
-        target = self.terminals[index][0]
-        previous = self.current_workspace_tab
-        if previous is not None and previous is not target:
-            previous.workspace_mode = self.inspector_return_mode if self.mode == "inspect" else self.mode
-            if self.browser_state_tab is previous:
-                previous.workspace_browser = self.capture_browser_state()
-        self.current_workspace_tab = target
-        self.terminal_tabs.set_current_page(index)
-        self.restoring_workspace_tab = True
-        try:
-            if previous is not target and target.workspace_mode in {"files", "gallery"}:
-                self.restore_browser_state(target.workspace_browser)
-                if self.panes:
-                    self.browser_state_tab = target
-            self.set_mode(target.workspace_mode)
-        finally:
-            self.restoring_workspace_tab = False
-        self.refresh_mode_buttons()
-        if target.workspace_mode == "console":
-            target.grab_focus()
-
-    def capture_browser_state(self):
-        if not self.panes:
-            return dict(self.initial_browser_state)
-        return {
-            "paths": tuple(pane.path for pane in self.panes),
-            "pane_modes": tuple(pane.content_stack.get_visible_child_name() for pane in self.panes),
-            "sorts": tuple((pane.sort_key, pane.sort_reverse) for pane in self.panes),
-            "active": self.active.index,
-        }
-
-    def restore_browser_state(self, browser):
-        if not self.panes:
-            return
-        for pane, path, mode, sorting in zip(self.panes, browser["paths"], browser["pane_modes"],
-                                            browser.get("sorts", (("name", False),) * 2)):
-            pane.sort_key, pane.sort_reverse = sorting
-            if pane.path != path or (pane.sort_key == "created" and not pane.created_loaded):
-                pane.navigate(path)
-            elif pane.listed_rows and not pane.results_active:
-                pane.show_directory_rows(pane.listed_rows)
-            if mode == "gallery":
-                self.ensure_gallery()
-            pane.content_stack.set_visible_child_name(mode)
-            self.refresh_pane_controls(pane)
-            if mode == "gallery":
-                pane.gallery.show()
-        self.activate_pane(self.panes[browser["active"]], update=False)
-        self.directory_changed(self.active)
-
-    def switch_top_tab(self, direction):
-        tabs = [terminal for terminal, _pid in self.terminals]
-        if not tabs:
-            return
-        current = self.current_workspace_tab or tabs[0]
-        target = tabs[(tabs.index(current) + direction) % len(tabs)]
-        self.select_terminal(next(i for i, (terminal, _pid) in enumerate(self.terminals) if terminal is target))
-
-    def top_tab_shortcut(self, key, state):
-        if not state & Gdk.ModifierType.CONTROL_MASK or state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.ALT_MASK):
-            return False
-        if key in {"Page_Up", "KP_Page_Up", "Prior", "KP_Prior"}:
-            self.switch_top_tab(-1)
-        elif key in {"Page_Down", "KP_Page_Down", "Next", "KP_Next"}:
-            self.switch_top_tab(1)
-        else:
-            return False
         return True
 
     def route_browser_arrows(self, widget):
@@ -1013,7 +928,7 @@ class Window(Gtk.ApplicationWindow):
             lambda exc: self.quick_document.get_buffer().set_text(f"Cannot preview {path.name}: {exc}") if serial == self.quick_serial else None)
 
     def project_previous_mode(self):
-        terminal = self.current_workspace_tab
+        terminal = self.shells.current
         return getattr(terminal, "workspace_project_return_mode", self.project_return_mode)
 
     def set_mode(self, mode, *, preserve_project_return=False):
@@ -1021,9 +936,9 @@ class Window(Gtk.ApplicationWindow):
             mode = "files"
         previous_mode = self.mode
         if (mode in {"files", "gallery", "project"} and self.file_panes is None
-                and self.current_workspace_tab is not None):
-            terminal = self.current_workspace_tab
-            self.update_shell_cwd(terminal)
+                and self.shells.current is not None):
+            terminal = self.shells.current
+            self.shells.update_cwd(terminal)
             if terminal.workspace_cwd is not None:
                 browser = terminal.workspace_browser
                 paths = list(browser["paths"])
@@ -1033,22 +948,22 @@ class Window(Gtk.ApplicationWindow):
             self.ensure_gallery()
         elif mode == "files":
             self.ensure_browser()
-        if (mode in {"files", "gallery"} and self.current_workspace_tab is not None
-                and self.browser_state_tab is not self.current_workspace_tab):
-            self.restore_browser_state(self.current_workspace_tab.workspace_browser)
-            self.browser_state_tab = self.current_workspace_tab
+        if (mode in {"files", "gallery"} and self.shells.current is not None
+                and self.shells.browser_state_tab is not self.shells.current):
+            self.shells.restore_browser_state(self.shells.current.workspace_browser)
+            self.shells.browser_state_tab = self.shells.current
         previous_pane_mode = (self.active.content_stack.get_visible_child_name()
                               if self.active is not None else "files")
-        terminal = self.current_workspace_tab
+        terminal = self.shells.current
         if (mode == "project" and previous_mode != "project"
-                and not self.restoring_workspace_tab and not preserve_project_return):
+                and not self.shells.restoring and not preserve_project_return):
             return_mode = (self.inspector_return_mode if previous_mode == "inspect"
                            else previous_mode)
             self.project_return_mode = (return_mode if return_mode in {"files", "gallery", "console"}
                                         else "files")
             if terminal is not None:
                 terminal.workspace_project_return_mode = self.project_return_mode
-        if mode == "console" and previous_mode != "console" and not self.restoring_workspace_tab:
+        if mode == "console" and previous_mode != "console" and not self.shells.restoring:
             self.output_return_mode = previous_mode
             if terminal is not None:
                 terminal.workspace_output_return_mode = previous_mode
@@ -1057,20 +972,20 @@ class Window(Gtk.ApplicationWindow):
             self.status.remove_css_class("footer-marked")
         if mode != "inspect":
             self.state.save(mode=mode)
-            if terminal is not None and not self.restoring_workspace_tab:
+            if terminal is not None and not self.shells.restoring:
                 terminal.workspace_mode = mode
         self.stack.set_visible_child_name("files" if mode in {"files", "gallery"} else mode)
         self.command_row.show() if mode in {"files", "gallery"} else self.command_row.hide()
         self.info_box.show() if mode in {"project", "inspect"} else self.info_box.hide()
         if mode == "project":
             browser = terminal.workspace_browser if terminal is not None else self.initial_browser_state
-            self.load_project_context(self.active.path if self.browser_state_tab is terminal
+            self.load_project_context(self.active.path if self.shells.browser_state_tab is terminal
                                       else browser["paths"][browser["active"]])
         if mode == "console":
             self.terminal_box.show()
-            if not self.terminals:
-                self.new_terminal(reveal=False)
-            terminal = self.terminals[self.terminal_tabs.get_current_page()][0]
+            if not self.shells.terminals:
+                self.shells.new(reveal=False)
+            terminal = self.shells.terminals[self.shells.notebook.get_current_page()][0]
             terminal.grab_focus()
         else:
             if mode == "files":
@@ -1149,7 +1064,7 @@ class Window(Gtk.ApplicationWindow):
     def capture_browser_key(self, _controller, keyval, _keycode, state):
         focus = self.get_focus()
         key = Gdk.keyval_name(keyval)
-        if self.top_tab_shortcut(key, state):
+        if self.shells.top_tab_shortcut(key, state):
             return True
         if focus is not None and (isinstance(focus, Gtk.Popover)
                                   or focus.get_ancestor(Gtk.Popover) is not None):
@@ -1429,7 +1344,7 @@ class Window(Gtk.ApplicationWindow):
                 return
             pane.navigate(target)
             terminal = self.shell_for_commands()
-            if self.terminal_has_foreground_program(terminal):
+            if self.shells.has_foreground_program(terminal):
                 terminal.workspace_cwd = None
                 self.status.set_text("Folder changed; the shell is busy and will sync at its next command.")
                 if self.mode != "gallery" or target == previous_directory:
@@ -1441,8 +1356,8 @@ class Window(Gtk.ApplicationWindow):
                                  else f"cd {shlex.quote(str(target))}")
                 terminal.workspace_pending.append(shell_command + "\n")
                 terminal.workspace_cwd = target
-                self.flush_terminal_commands(terminal)
-            self.terminal_tabs.set_current_page(terminal.workspace_page_index)
+                self.shells.flush_commands(terminal)
+            self.shells.notebook.set_current_page(terminal.workspace_page_index)
             if self.mode != "gallery" or target == previous_directory:
                 self.focus_active_browser()
 
@@ -1468,7 +1383,7 @@ class Window(Gtk.ApplicationWindow):
             return
         directory = self.active.path
         terminal = self.shell_for_commands()
-        if self.terminal_has_foreground_program(terminal):
+        if self.shells.has_foreground_program(terminal):
             self.command_entry.set_text(command)
             self.status.set_text("Shell is busy; wait for the prompt or use its terminal view.")
             return
@@ -1476,42 +1391,24 @@ class Window(Gtk.ApplicationWindow):
                    if terminal.workspace_cwd != directory else command + "\n")
         terminal.workspace_pending.append(payload)
         terminal.workspace_cwd = directory
-        self.flush_terminal_commands(terminal)
+        self.shells.flush_commands(terminal)
         self.command_refresh_pending = True
         self.set_mode("console")
-        self.terminal_tabs.set_current_page(terminal.workspace_page_index)
+        self.shells.notebook.set_current_page(terminal.workspace_page_index)
         terminal.grab_focus()
 
     def shell_for_commands(self):
-        terminal = self.current_workspace_tab
+        terminal = self.shells.current
         if terminal is None or terminal.workspace_exited:
-            terminal = self.new_terminal()
-        self.update_shell_cwd(terminal)
+            terminal = self.shells.new()
+        self.shells.update_cwd(terminal)
         self.command_terminal = terminal
         return terminal
 
-    def update_shell_cwd(self, terminal):
-        if (not terminal.workspace_ready or terminal.workspace_pending
-                or self.terminal_has_foreground_program(terminal)):
-            return
-        record = next((record for record in self.terminals if record[0] is terminal), None)
-        if record is None or not record[1]:
-            return
-        try:
-            terminal.workspace_cwd = Path(os.readlink(f"/proc/{record[1]}/cwd"))
-        except OSError:
-            pass
-
-    @staticmethod
-    def flush_terminal_commands(terminal):
-        if terminal.workspace_ready and not terminal.workspace_exited and terminal.workspace_pending:
-            terminal.workspace_ready = False
-            terminal.feed_child(terminal.workspace_pending.pop(0).encode("utf-8"))
-
     def toggle_shell_output(self):
         if self.mode == "console":
-            return_mode = (self.current_workspace_tab.workspace_output_return_mode
-                           if self.current_workspace_tab is not None else self.output_return_mode)
+            return_mode = (self.shells.current.workspace_output_return_mode
+                           if self.shells.current is not None else self.output_return_mode)
             self.set_mode(return_mode if return_mode != "console" else "files",
                           preserve_project_return=True)
         else:
@@ -1529,287 +1426,12 @@ class Window(Gtk.ApplicationWindow):
             return False
         return True
 
-    def terminal_shortcut(self, _terminal, event):
-        key = (Gdk.keyval_name(event.keyval) or "").lower()
-        control = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
-        shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
-        alt = bool(event.state & Gdk.ModifierType.ALT_MASK)
-        if self.top_tab_shortcut(Gdk.keyval_name(event.keyval), event.state):
-            return True
-        if (control or shift) and not alt and key in {"return", "kp_enter"}:
-            _terminal.feed_child(b"\n")
-            return True
-        if ((control and shift and key == "v")
-                or (shift and not control and key in {"insert", "kp_insert"})) and not alt:
-            self.paste_terminal_clipboard(_terminal)
-            return True
-        if control and shift and not alt and key in {"o", "p"}:
-            _terminal.feed_child(b"\x0f" if key == "o" else b"\x10")
-            return True
-        if control and not shift and not alt and key in {"o", "p"}:
-            if self.terminal_has_foreground_program(_terminal):
-                return False
-            self.mode_shortcut(key)
-            return True
-        if control and not shift and not alt and key in {"1", "2", "3", "4"}:
-            if self.terminal_has_foreground_program(_terminal):
-                return False
-            self.set_mode({"1": "files", "2": "project", "3": "console", "4": "gallery"}[key])
-            return True
-        return False
-
-    def terminal_has_foreground_program(self, terminal):
-        record = next((record for record in self.terminals if record[0] is terminal), None)
-        if record is None or not record[1]:
-            return False
-        try:
-            pty = terminal.get_pty()
-            return pty is not None and os.tcgetpgrp(pty.get_fd()) != os.getpgid(record[1])
-        except OSError:
-            return False
-
-    def new_terminal(self, command=None, reveal=True):
-        terminal = Vte.Terminal()
-        terminal.set_scrollback_lines(20000)
-        terminal.set_allow_hyperlink(True)
-        pcre2_multiline = 0x00000400
-        url_regex = Vte.Regex.new_for_match(r"(?:https?|file)://[^[:space:]<>'\"()]+|mailto:[^[:space:]<>'\"()]+", -1,
-                                            pcre2_multiline)
-        path_regex = Vte.Regex.new_for_match(
-            r"(?<![A-Za-z0-9:/])(?:(?:(?:~|\.{1,2})?/|[A-Za-z0-9_.-]+/)[A-Za-z0-9_./+@%~=-]+|[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+)(?::[0-9]+(?::[0-9]+)?)?",
-            -1, pcre2_multiline)
-        terminal.workspace_url_tag = terminal.match_add_regex(url_regex, 0)
-        terminal.workspace_path_tag = terminal.match_add_regex(path_regex, 0)
-        terminal.match_set_cursor_name(terminal.workspace_url_tag, "pointer")
-        terminal.match_set_cursor_name(terminal.workspace_path_tag, "pointer")
-        fonts = self.appearance["fonts"]
-        terminal_font = Pango.FontDescription()
-        terminal_font.set_family(fonts["family"])
-        terminal_font.set_absolute_size(fonts["files_px"] * Pango.SCALE)
-        terminal_font.set_weight(Pango.Weight(fonts["files_weight"]))
-        terminal.set_font(terminal_font)
-
-        def rgba(value):
-            color = Gdk.RGBA()
-            color.parse(value)
-            return color
-
-        terminal.set_colors(rgba(self.palette.get("terminal_foreground", self.palette["foreground"])),
-                            rgba(self.palette.get("terminal_background", self.palette["background"])),
-                            [rgba(color) for color in self.appearance["ansi"]])
-        terminal.set_audible_bell(False)
-        terminal.set_scroll_on_keystroke(True)
-        connect_click(terminal, self.terminal_menu)
-        connect_key(terminal, self.terminal_shortcut, capture=True)
-        terminal.workspace_ready = False
-        terminal.workspace_spawned = False
-        terminal.workspace_ready_source = 0
-        terminal.workspace_exited = False
-        terminal.workspace_pending = []
-        terminal.workspace_mode = "console"
-        terminal.workspace_output_return_mode = "files"
-        terminal.workspace_project_return_mode = "files"
-        terminal.workspace_browser = (self.capture_browser_state()
-                                      if self.current_workspace_tab is None
-                                      or self.browser_state_tab is self.current_workspace_tab
-                                      else dict(self.current_workspace_tab.workspace_browser))
-        if self.mode == "console" and self.current_workspace_tab is not None:
-            self.update_shell_cwd(self.current_workspace_tab)
-            folder = (self.current_workspace_tab.workspace_cwd
-                      or terminal.workspace_browser["paths"][terminal.workspace_browser["active"]])
-            paths = list(terminal.workspace_browser["paths"])
-            paths[terminal.workspace_browser["active"]] = folder
-            terminal.workspace_browser["paths"] = tuple(paths)
-        else:
-            folder = (self.active.path if self.active is not None
-                      else self.initial_browser_state["paths"][0])
-        terminal.workspace_cwd = folder
-        argv = command or [os.environ.get("SHELL", "/bin/bash"), "-i"]
-        self.terminal_sequence += 1
-        terminal.workspace_tab_number = self.terminal_sequence
-        tab_name = str(folder)
-        title = Gtk.Label(label=tab_name)
-        page = scrolled(terminal)
-        insert_at = (self.current_workspace_tab.workspace_page_index + 1
-                     if self.current_workspace_tab is not None else len(self.terminals))
-        preceding_tab = (self.terminals[insert_at - 1][0].workspace_tab_group
-                         if insert_at else None)
-        index = self.terminal_tabs.insert_page(page, title, insert_at)
-        page.show()
-        title.show()
-        terminal.workspace_page_index = index
-        tab_group = Box(spacing=0)
-        tab_button = button(tab_name, lambda target=terminal: self.select_terminal(target.workspace_page_index))
-        tab_button.add_css_class("top-tab")
-        tab_button.set_tooltip_text(f"{tab_name} · {folder}")
-        tab_button.get_child().set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-        tab_button.get_child().set_max_width_chars(24)
-        close_button = button("×", lambda target=terminal: self.close_terminal(target))
-        close_button.add_css_class("tab-close")
-        close_button.set_tooltip_text(f"Close shell in {folder}")
-        tab_group.pack_start(tab_button, False, False, 0)
-        tab_group.pack_start(close_button, False, False, 0)
-        self.terminal_tab_bar.insert_child_after(tab_group, preceding_tab)
-        tab_group.show()
-        terminal.workspace_tab_button = tab_button
-        terminal.workspace_tab_group = tab_group
-        record = [terminal, 0]
-        self.terminals.insert(index, record)
-        for number, (remaining, _pid) in enumerate(self.terminals):
-            remaining.workspace_page_index = number
-        if self.current_workspace_tab is None:
-            self.current_workspace_tab = terminal
-
-        def exited(*_):
-            record[1] = 0
-            terminal.workspace_exited = True
-            terminal.workspace_ready = False
-            if terminal.workspace_ready_source:
-                GLib.source_remove(terminal.workspace_ready_source)
-                terminal.workspace_ready_source = 0
-            if not getattr(terminal, "workspace_closed", False):
-                GLib.idle_add(lambda: self.close_terminal(terminal, force=True, from_shell_exit=True))
-
-        terminal.connect("child-exited", exited)
-
-        def ready():
-            terminal.workspace_ready_source = 0
-            if not terminal.workspace_spawned or terminal.workspace_exited or terminal.workspace_ready:
-                return False
-            terminal.workspace_ready = True
-            self.flush_terminal_commands(terminal)
-            return False
-
-        def output_changed(*_):
-            if not terminal.workspace_spawned or terminal.workspace_ready:
-                return
-            if terminal.workspace_ready_source:
-                GLib.source_remove(terminal.workspace_ready_source)
-            terminal.workspace_ready_source = GLib.timeout_add(180, ready)
-
-        terminal.connect("contents-changed", output_changed)
-
-        def spawned(_terminal, pid, error, _data):
-            record[1] = max(0, pid)
-            if error:
-                terminal.workspace_exited = True
-                self.failure(error)
-            else:
-                terminal.workspace_spawned = True
-                GLib.timeout_add(600, lambda: False if terminal.workspace_ready_source else ready())
-        terminal.spawn_async(Vte.PtyFlags.DEFAULT, str(folder), argv, None,
-            GLib.SpawnFlags.SEARCH_PATH, None, None, -1, None, spawned, None)
-        if reveal:
-            self.select_terminal(index)
-        else:
-            self.refresh_mode_buttons()
-        return terminal
-
-    def close_terminal(self, terminal, force=False, from_shell_exit=False):
-        index = next((i for i, (candidate, _pid) in enumerate(self.terminals)
-                      if candidate is terminal), None)
-        if index is None:
-            return
-        pid = self.terminals[index][1]
-        if pid and not force:
-            def approved():
-                try:
-                    os.kill(pid, signal.SIGHUP)
-                except ProcessLookupError:
-                    pass
-                self.close_terminal(terminal, force=True)
-
-            confirm(self, "Close this terminal tab and end its process?", None, approved)
-            return
-        terminal.workspace_closed = True
-        was_active = terminal is self.current_workspace_tab
-        if terminal is self.command_terminal:
-            self.command_terminal = None
-        self.terminal_tabs.remove_page(index)
-        self.terminal_tab_bar.remove(terminal.workspace_tab_group)
-        self.terminals.pop(index)
-        for number, (remaining, _pid) in enumerate(self.terminals):
-            remaining.workspace_page_index = number
-        if was_active:
-            self.current_workspace_tab = None
-        if not self.terminals:
-            if from_shell_exit:
-                self.quit(on_cancel=self.new_terminal)
-                return
-            self.new_terminal()
-        elif was_active:
-            self.select_terminal(min(index, len(self.terminals) - 1))
-        self.refresh_mode_buttons()
-
-    def terminal_menu(self, terminal, event):
-        if event.button == 1 and event.state & Gdk.ModifierType.CONTROL_MASK:
-            return self.open_terminal_link(terminal, event)
-        if event.button != 3:
-            return False
-        old_menu = getattr(terminal, "workspace_menu", None)
-        if old_menu is not None:
-            old_menu.popdown()
-            old_menu.unparent()
-        menu = Gtk.Popover()
-        menu.set_parent(terminal)
-        point = Gdk.Rectangle()
-        point.x, point.y = int(event.x), int(event.y)
-        point.width = point.height = 1
-        menu.set_pointing_to(point)
-        content = Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, margin=6)
-        for title, callback in (("Copy", lambda: terminal.copy_clipboard_format(Vte.Format.TEXT)),
-                                ("Paste", lambda: self.paste_terminal_clipboard(terminal)),
-                                ("Send Ctrl+O", lambda: terminal.feed_child(b"\x0f"))):
-            content.append(button(title, lambda action=callback: (action(), menu.popdown())))
-        menu.set_child(content)
-        terminal.workspace_menu = menu
-        menu.popup()
-        return True
-
-    def paste_terminal_clipboard(self, terminal):
-        if terminal.workspace_exited or getattr(terminal, "workspace_closed", False):
-            return
-        formats = Gdk.Display.get_default().get_clipboard().get_formats()
-        has_image = (formats.contain_gtype(Gdk.Texture.__gtype__)
-                     or any(mime.startswith("image/") for mime in formats.get_mime_types() or ()))
-        if has_image and self.terminal_has_foreground_program(terminal):
-            # The foreground TUI (for example Codex) reads the image itself.
-            terminal.feed_child(b"\x16")
-        else:
-            terminal.paste_clipboard()
-
-    def open_terminal_link(self, terminal, event):
-        uri = terminal.check_hyperlink_at(event.x, event.y)
-        if not uri:
-            match, tag = terminal.check_match_at(event.x, event.y)
-            if not match:
-                return False
-            if tag == terminal.workspace_url_tag:
-                uri = match.rstrip('.,;:!?)\"]')
-            elif tag == terminal.workspace_path_tag:
-                path_text = re.sub(r":\d+(?::\d+)?$", "", match)
-                path = Path(path_text).expanduser()
-                if not path.is_absolute():
-                    path = Path(terminal.workspace_cwd) / path
-                if not path.exists():
-                    return False
-                uri = path.absolute().as_uri()
-            else:
-                return False
-        if urlsplit(uri).scheme not in {"http", "https", "file", "mailto"}:
-            return False
-        try:
-            Gio.AppInfo.launch_default_for_uri(uri, None)
-        except GLib.Error as error:
-            self.failure(error)
-        return True
-
     def hide_window(self, *_):
         self.hide()
         return True
 
     def quit(self, confirmed=False, on_cancel=None):
-        active_terminals = any(pid for _terminal, pid in self.terminals)
+        active_terminals = any(pid for _terminal, pid in self.shells.terminals)
         active_jobs = bool(self.operations.running())
         if (active_terminals or active_jobs) and not confirmed:
             question = ("Quit Nightty and close its terminals?" if active_terminals
@@ -1830,12 +1452,12 @@ class Window(Gtk.ApplicationWindow):
         shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
         alt = bool(event.state & Gdk.ModifierType.ALT_MASK)
         key = Gdk.keyval_name(event.keyval)
-        terminal_focus = any(terminal.has_focus() for terminal, _pid in self.terminals)
+        terminal_focus = any(terminal.has_focus() for terminal, _pid in self.shells.terminals)
         focus = self.get_focus()
         if (focus is not None and focus.get_ancestor(Gtk.Popover) is not None
                 and key in {"Escape", "Left", "Right", "Up", "Down", "Return", "KP_Enter"}):
             return False
-        if self.top_tab_shortcut(key, event.state):
+        if self.shells.top_tab_shortcut(key, event.state):
             return True
         if terminal_focus and not (
                 ctrl and (not shift and key.lower() in {"o", "p", "q", "1", "2", "3", "4"}
@@ -1843,12 +1465,12 @@ class Window(Gtk.ApplicationWindow):
                 or key == "F12"):
             return False
         if terminal_focus and ctrl and shift and key.lower() in {"o", "p"}:
-            self.current_workspace_tab.feed_child(
+            self.shells.current.feed_child(
                 b"\x0f" if key.lower() == "o" else b"\x10")
             return True
         if ((terminal_focus or self.mode == "console") and ctrl and not shift
                 and key.lower() in {"o", "p", "1", "2", "3", "4"}
-                and self.terminal_has_foreground_program(self.current_workspace_tab)):
+                and self.shells.has_foreground_program(self.shells.current)):
             return False
         if ctrl and key in {"1", "2", "3", "4"}:
             self.set_mode({"1": "files", "2": "project", "3": "console", "4": "gallery"}[key])
@@ -1868,14 +1490,14 @@ class Window(Gtk.ApplicationWindow):
         elif (alt and key == "F7" or ctrl and shift and key.lower() == "f") and self.mode in {"files", "gallery"}:
             self.show_find_dialog()
         elif ctrl and shift and key.lower() == "t":
-            self.new_terminal()
+            self.shells.new()
         elif terminal_focus and ctrl and shift and key.lower() in {"c", "v"}:
-            index = self.terminal_tabs.get_current_page()
-            terminal = self.terminals[index][0]
+            index = self.shells.notebook.get_current_page()
+            terminal = self.shells.terminals[index][0]
             if key.lower() == "c":
                 terminal.copy_clipboard_format(Vte.Format.TEXT)
             else:
-                self.paste_terminal_clipboard(terminal)
+                self.shells.paste_clipboard(terminal)
         elif ctrl and key.lower() == "q":
             self.quit()
         elif key == "F12":
