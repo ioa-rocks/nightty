@@ -13,7 +13,6 @@ import shlex
 import signal
 import socket
 import stat
-import textwrap
 import threading
 from urllib.parse import urlsplit
 import uuid
@@ -22,12 +21,13 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Vte", "3.91")
-from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, Vte
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango, Vte
 
 from .agents import Agents
 from .appearance import load_appearance, stylesheet
 from .model import Deletion, Transfer, context_for, directory_entries, sort_directory_rows
-from .previews import pdf_pixbuf
+from .gallery import Gallery
+from .previews import format_size, read_preview
 from .search import SearchCancelled, find_names
 from .widgets import (Box, button, confirm, connect_click, connect_focus, connect_key, dialog_button,
                       drawing_overlay, label, on_resize, scrolled, text_has_focus, textview,
@@ -40,20 +40,7 @@ class Pane(Box):
         self.window, self.path, self.index = window, Path(folder), index
         self.previous_path = None
         self.hidden, self.generation = False, 0
-        self.gallery_serial = 0
-        self.gallery_capacity, self.gallery_columns = 1, 2
-        self.gallery_resize_source = 0
-        self.gallery_building = False
-        self.gallery_scroll_snap_source = 0
-        self.gallery_children_by_logical = []
-        self.gallery_replicas_by_logical = {}
-        self.gallery_selection_syncing = False
-        self.gallery_displayed_path = None
-        self.gallery_build_waiting = False
-        self.gallery_preview_results = {}
-        self.gallery_render_waiters = {}
-        self.gallery_pending_target = None
-        self.gallery_pending_top = None
+        self.gallery = Gallery(self)
         self.sort_key = "name"
         self.sort_reverse = False
         self.created_loaded = False
@@ -315,7 +302,7 @@ class Pane(Box):
                 self.window.directory_changed(self)
             self.show_directory_rows(rows)
             if self.content_stack.get_visible_child_name() == "gallery":
-                self.window.show_gallery(self)
+                self.gallery.show()
             if self.window.quick_enabled:
                 if self.index == 1:
                     self.window.quick_destination.set_text(str(path))
@@ -527,7 +514,7 @@ class Pane(Box):
         else:
             self.show_directory_rows(self.listed_rows)
             if self.content_stack.get_visible_child_name() == "gallery":
-                self.window.show_gallery(self)
+                self.gallery.show()
 
     def show_search(self):
         self.window.set_mode("files")
@@ -1297,7 +1284,7 @@ class Window(Gtk.ApplicationWindow):
         self.gallery_key_capture = Gtk.EventControllerKey.new()
         self.add_controller(self.gallery_key_capture)
         self.gallery_key_capture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
-        self.gallery_key_capture.connect("key-pressed", self.capture_gallery_key)
+        self.gallery_key_capture.connect("key-pressed", self.capture_browser_key)
 
         style = Gtk.CssProvider()
         style.load_from_data(stylesheet(self.appearance))
@@ -1505,41 +1492,9 @@ class Window(Gtk.ApplicationWindow):
     def ensure_gallery(self):
         self.ensure_browser()
         for pane in self.panes:
-            if getattr(pane, "gallery_flow", None) is not None:
-                continue
-            pane.gallery_flow = Gtk.FlowBox()
-            pane.gallery_flow.set_can_focus(True)
-            pane.gallery_flow.set_focusable(True)
-            pane.gallery_flow.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
-            pane.gallery_flow.set_activate_on_single_click(False)
-            pane.gallery_flow.set_row_spacing(8)
-            pane.gallery_flow.set_column_spacing(8)
-            pane.gallery_flow.set_min_children_per_line(1)
-            pane.gallery_flow.set_max_children_per_line(2)
-            pane.gallery_flow.set_homogeneous(True)
-            pane.gallery_flow.set_valign(Gtk.Align.START)
-            pane.gallery_flow.set_margin_top(7)
-            pane.gallery_flow.set_margin_start(7)
-            pane.gallery_flow.set_margin_end(7)
-            pane.gallery_flow.set_margin_bottom(120)
-            pane.gallery_flow.connect("selected-children-changed", self.gallery_selected)
-            pane.gallery_flow.connect("child-activated", self.gallery_activated)
-            connect_key(pane.gallery_flow, self.gallery_key)
-            connect_focus(pane.gallery_flow, lambda _flow, _event, target=pane: self.activate_pane(target))
-            connect_click(pane.gallery_flow, lambda flow, event, target=pane:
-                          self.gallery_click(target, flow, event))
-            pane.gallery_scroll = scrolled(pane.gallery_flow)
-            on_resize(pane.gallery_scroll, lambda _scroll, _allocation, target=pane:
-                      self.gallery_resized(target))
-            pane.gallery_scroll.get_vadjustment().connect("value-changed", lambda _adjustment, target=pane:
-                                                          self.gallery_scroll_changed(target))
-            pane.gallery_overlay = drawing_overlay(pane.gallery_scroll,
-                lambda scroll, context, target=pane: self.draw_gallery_edge(target, scroll, context))
-            connect_click(pane.gallery_scroll, lambda scroll, event, target=pane:
-                          self.gallery_click(target, scroll, event))
-            pane.content_stack.add_named(pane.gallery_overlay, "gallery")
-            pane.gallery_scroll.show()
-        self.gallery_flow = self.active.gallery_flow
+            if pane.gallery.flow is None:
+                pane.gallery.build()
+        self.gallery_flow = self.active.gallery.flow
 
     def file_color(self, name, directory, symlink, executable):
         if symlink:
@@ -1587,13 +1542,7 @@ class Window(Gtk.ApplicationWindow):
                 and 0 < position < width):
             self.pane_split_ratio = position / width
 
-    @staticmethod
-    def size(value):
-        for unit in ("B", "KiB", "MiB", "GiB"):
-            if value < 1024 or unit == "GiB":
-                return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
-            value /= 1024
-
+    size = staticmethod(format_size)
     def async_call(self, operation, callback, error=None, executor=None):
         future = (executor or self.pool).submit(operation)
 
@@ -1620,7 +1569,7 @@ class Window(Gtk.ApplicationWindow):
             if self.current_workspace_tab is not None and not self.restoring_workspace_tab:
                 self.current_workspace_tab.workspace_mode = self.mode
             if self.mode == "gallery":
-                self.gallery_flow = pane.gallery_flow
+                self.gallery_flow = pane.gallery.flow
             self.refresh_mode_buttons()
         for candidate in self.panes:
             css = candidate.get_style_context()
@@ -1631,7 +1580,7 @@ class Window(Gtk.ApplicationWindow):
         if update:
             self.directory_changed(pane)
         if changed and self.mode in {"files", "gallery"}:
-            selected = (self.gallery_selected_paths() if self.mode == "gallery"
+            selected = (self.active.gallery.selected_paths() if self.mode == "gallery"
                         else pane.selected_paths())
             self.selection = selected[0] if selected else None
         return False
@@ -1722,7 +1671,7 @@ class Window(Gtk.ApplicationWindow):
             pane.content_stack.set_visible_child_name(mode)
             self.refresh_pane_controls(pane)
             if mode == "gallery":
-                self.show_gallery(pane)
+                pane.gallery.show()
         self.activate_pane(self.panes[browser["active"]], update=False)
         self.directory_changed(self.active)
 
@@ -1761,7 +1710,7 @@ class Window(Gtk.ApplicationWindow):
             return False
         if self.mode == "gallery":
             self.gallery_flow.grab_focus()
-            return self.gallery_key(self.gallery_flow, event)
+            return self.active.gallery.key(self.gallery_flow, event)
         self.active.view.grab_focus()
         return self.active.move_by_key(self.active.view, event)
 
@@ -1835,8 +1784,8 @@ class Window(Gtk.ApplicationWindow):
             logical = pane.cursor_logical()
             row = pane.entries[logical] if logical is not None and logical < len(pane.entries) else None
         else:
-            selected = {str(path) for path in self.gallery_selected_paths(pane)}
-            selected_child = pane.gallery_flow.get_focus_child()
+            selected = {str(path) for path in pane.gallery.selected_paths()}
+            selected_child = pane.gallery.flow.get_focus_child()
             current = (str(selected_child.file_path) if selected_child is not None
                        and hasattr(selected_child, "file_path") else None)
             row = next((entry for entry in pane.entries if entry[3] == current), None)
@@ -2269,7 +2218,7 @@ class Window(Gtk.ApplicationWindow):
             self.quick_preview_stack.set_visible_child_name(kind)
             self.quick_details.set_text(details)
 
-        self.async_call(lambda: self.read_preview(path, 650, 650), shown,
+        self.async_call(lambda: read_preview(path, 650, 650), shown,
             lambda exc: self.quick_document.get_buffer().set_text(f"Cannot preview {path.name}: {exc}") if serial == self.quick_serial else None)
 
     def project_previous_mode(self):
@@ -2336,7 +2285,7 @@ class Window(Gtk.ApplicationWindow):
             if mode == "files":
                 gallery_target = None
                 if previous_pane_mode == "gallery":
-                    flow = self.active.gallery_flow
+                    flow = self.active.gallery.flow
                     focused = flow.get_focus_child()
                     selected_gallery = flow.get_selected_children()
                     item = (focused if focused is not None and hasattr(focused, "file_path")
@@ -2344,7 +2293,7 @@ class Window(Gtk.ApplicationWindow):
                     gallery_target = item.file_path if item is not None else None
                 self.active.content_stack.set_visible_child_name("files")
                 if previous_pane_mode == "gallery":
-                    self.active.gallery_serial += 1
+                    self.active.gallery.serial += 1
                     self.active.focus_file_path(gallery_target)
                 selected = self.active.selected_paths()
                 self.selection = selected[0] if selected else None
@@ -2361,12 +2310,12 @@ class Window(Gtk.ApplicationWindow):
                     self.quick_serial += 1
                     self.right_stack.set_visible_child_name("files")
                 self.active.content_stack.set_visible_child_name("gallery")
-                self.active.gallery_overlay.drawing_area.queue_draw()
-                self.gallery_flow = self.active.gallery_flow
+                self.active.gallery.overlay.drawing_area.queue_draw()
+                self.gallery_flow = self.active.gallery.flow
                 if previous_pane_mode != "gallery":
-                    self.show_gallery(self.active)
+                    self.active.gallery.show()
                 else:
-                    selected = self.gallery_selected_paths()
+                    selected = self.active.gallery.selected_paths()
                     self.selection = selected[0] if selected else None
                 self.update_command_prompt()
                 self.refresh_folder_footer(self.active)
@@ -2385,7 +2334,7 @@ class Window(Gtk.ApplicationWindow):
 
     def focus_active_browser(self):
         if self.mode == "gallery":
-            flow = self.active.gallery_flow
+            flow = self.active.gallery.flow
             selected = flow.get_selected_children()
             child = flow.get_focus_child() or (selected[-1] if selected else None)
             if (child is None or not child.get_visible()
@@ -2406,216 +2355,7 @@ class Window(Gtk.ApplicationWindow):
         self.activate_pane(self.panes[1 - self.active.index])
         self.focus_active_browser()
 
-    def gallery_click(self, pane, widget, event, child=None):
-        if event.button != 1 or event.type != Gdk.EventType.BUTTON_PRESS:
-            return False
-        self.activate_pane(pane)
-        flow = pane.gallery_flow
-        if event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK):
-            return False
-        top = self.gallery_top(pane)
-        visible = [item for item in widget_children(flow)
-                   if (hasattr(item, "gallery_index")
-                       and top <= item.gallery_row < top + pane.gallery_capacity)]
-        if child is not None and child not in visible:
-            child = None
-        if child is None:
-            coordinates = widget.translate_coordinates(flow, int(event.x), int(event.y))
-            if not visible:
-                flow.grab_focus()
-                return True
-            x, y = coordinates if coordinates is not None else (0, 0)
-            child = flow.get_child_at_pos(x, y)
-            if child not in visible:
-                def distance(item):
-                    rectangle = item.get_allocation()
-                    dx = max(rectangle.x - x, 0, x - rectangle.x - rectangle.width)
-                    dy = max(rectangle.y - y, 0, y - rectangle.y - rectangle.height)
-                    return dx * dx + dy * dy
-                child = min(reversed(visible), key=distance)
-        flow.unselect_all()
-        flow.select_child(child)
-        child.grab_focus()
-        self.scroll_gallery_to(child)
-        return True
-
-    def gallery_selected(self, flow):
-        if self.mode != "gallery" or flow is not self.gallery_flow:
-            return
-        if self.active.gallery_selection_syncing:
-            return
-        pane = self.active
-        selected_children = [child for child in flow.get_selected_children()
-                             if hasattr(child, "gallery_pane")]
-        selected_indices = {child.gallery_index for child in selected_children}
-        pane.gallery_selection_syncing = True
-        try:
-            for logical, replicas in pane.gallery_replicas_by_logical.items():
-                for child in replicas:
-                    if logical in selected_indices and not child.is_selected():
-                        flow.select_child(child)
-                    elif logical not in selected_indices and child.is_selected():
-                        flow.unselect_child(child)
-        finally:
-            pane.gallery_selection_syncing = False
-        paths = self.gallery_selected_paths()
-        selected = {str(child.file_path) for child in selected_children}
-        pane.view.handler_block(pane.cursor_handler)
-        pane.view.unselect_all()
-        for path in selected:
-            for position in pane.path_to_stores.get(path, ()):
-                pane.view.select_path(Gtk.TreePath.new_from_indices([position]))
-        pane.view.handler_unblock(pane.cursor_handler)
-        self.selection = paths[0] if paths else None
-        self.refresh_file_footer(pane)
-
-    def scroll_gallery_to(self, child):
-        pane = child.gallery_pane
-        flow = pane.gallery_flow
-        if child.get_parent() is not flow:
-            return False
-        children = widget_children(flow)
-        if not children or not hasattr(child, "gallery_row"):
-            return False
-        _columns, pitch, _first_y = self.gallery_geometry(flow, children)
-        top = self.gallery_top(pane)
-        if child.gallery_row < top:
-            top = child.gallery_row
-        elif child.gallery_row >= top + pane.gallery_capacity:
-            top = child.gallery_row - pane.gallery_capacity + 1
-        pane.gallery_scroll.get_vadjustment().set_value(min(self.gallery_max_top(pane), top) * pitch)
-        return False
-
-    @staticmethod
-    def gallery_max_top(pane):
-        return max(0, len(pane.gallery_children_by_logical) -
-                   pane.gallery_columns * pane.gallery_capacity)
-
-    def gallery_top(self, pane):
-        children = widget_children(pane.gallery_flow)
-        if len(children) < 2:
-            return 0
-        _columns, pitch, _first_y = self.gallery_geometry(pane.gallery_flow, children)
-        return min(self.gallery_max_top(pane), max(0, round(
-            pane.gallery_scroll.get_vadjustment().get_value() / pitch)))
-
-    @staticmethod
-    def gallery_child_for_index(pane, logical, top):
-        replicas = pane.gallery_replicas_by_logical.get(logical, ())
-        return next((child for child in replicas
-                     if top <= child.gallery_row < top + pane.gallery_capacity),
-                    min(replicas, key=lambda child: abs(child.gallery_row - top)) if replicas else None)
-
-    @staticmethod
-    def gallery_geometry(flow, children):
-        first = children[0]
-        first_y = first.get_allocation().y
-        columns = 2 if len(children) > 1 and children[1].get_allocation().y == first_y else 1
-        pitch = (children[columns].get_allocation().y - first_y if len(children) > columns
-                 else 0)
-        if pitch <= 0:
-            pitch = first.get_allocated_height() + flow.get_row_spacing()
-        return columns, pitch, first_y
-
-    def gallery_visible_bottom(self, pane):
-        flow = pane.gallery_flow
-        children = widget_children(flow)
-        if not children or children[0].get_allocated_height() <= 1:
-            return pane.gallery_scroll.get_allocated_height()
-        _columns, pitch, _first_y = self.gallery_geometry(flow, children)
-        origin = children[0].translate_coordinates(pane.gallery_scroll, 0, 0)
-        if origin is None:
-            return pane.gallery_scroll.get_allocated_height()
-        first_top = origin[1]
-        viewport = pane.gallery_scroll.get_allocated_height()
-        card_height = children[0].get_allocated_height()
-        last_full_row = math.floor((viewport - first_top - card_height) / pitch)
-        if last_full_row < 0:
-            return 0
-        return max(0, min(viewport, first_top + last_full_row * pitch + card_height))
-
-    def draw_gallery_edge(self, pane, scroll, context):
-        height = scroll.get_allocated_height()
-        bottom = self.gallery_visible_bottom(pane)
-        if bottom < height:
-            background = Gdk.RGBA()
-            background.parse(self.palette["background"])
-            context.set_source_rgba(background.red, background.green, background.blue, background.alpha)
-            context.rectangle(0, bottom, pane.gallery_flow.get_allocated_width(), height - bottom)
-            context.fill()
-        border = Gdk.RGBA()
-        border.parse(self.palette["border"])
-        context.set_source_rgba(border.red, border.green, border.blue, border.alpha)
-        context.rectangle(0, 0, 2, height)
-        context.fill()
-        return False
-
-    def gallery_scroll_changed(self, pane):
-        if pane.gallery_scroll_snap_source:
-            GLib.source_remove(pane.gallery_scroll_snap_source)
-        pane.gallery_scroll_snap_source = GLib.timeout_add(45, self.snap_gallery_scroll, pane)
-        pane.gallery_overlay.drawing_area.queue_draw()
-
-    def snap_gallery_scroll(self, pane):
-        pane.gallery_scroll_snap_source = 0
-        children = widget_children(pane.gallery_flow)
-        if len(children) > 1:
-            _columns, pitch, _first_y = self.gallery_geometry(pane.gallery_flow, children)
-            adjustment = pane.gallery_scroll.get_vadjustment()
-            maximum = max(0, adjustment.get_upper() - adjustment.get_page_size())
-            target = min(round(adjustment.get_value() / pitch), self.gallery_max_top(pane),
-                         math.floor(maximum / pitch)) * pitch
-            if abs(adjustment.get_value() - target) > 0.5:
-                adjustment.set_value(target)
-        return False
-
-    def gallery_layout(self, pane):
-        flow = pane.gallery_flow
-        children = widget_children(flow)
-        width = pane.gallery_scroll.get_allocated_width()
-        columns = 2 if width >= 2 * 310 + flow.get_column_spacing() + 14 else 1
-        card_height, pitch = 108, 108 + flow.get_row_spacing()
-        first_y = flow.get_margin_top()
-        if len(children) > 1 and children[0].get_allocated_height() > 1:
-            _old_columns, measured_pitch, _first_y = self.gallery_geometry(flow, children)
-            card_height = max(108, children[0].get_allocated_height())
-            pitch = max(card_height + flow.get_row_spacing(), measured_pitch)
-        viewport = pane.gallery_scroll.get_allocated_height()
-        capacity = max(1, math.floor((viewport - first_y - card_height) / pitch) + 1)
-        return columns, capacity
-
-    def gallery_resized(self, pane):
-        if pane.content_stack.get_visible_child_name() != "gallery":
-            return
-        if pane.gallery_build_waiting and pane.gallery_scroll.get_allocated_width() > 1:
-            self.show_gallery(pane)
-            return
-        if pane.gallery_resize_source:
-            GLib.source_remove(pane.gallery_resize_source)
-        pane.gallery_resize_source = GLib.timeout_add(120, self.apply_gallery_resize, pane)
-
-    def apply_gallery_resize(self, pane):
-        pane.gallery_resize_source = 0
-        if (not pane.gallery_building
-                and pane.content_stack.get_visible_child_name() == "gallery"
-                and widget_children(pane.gallery_flow)
-                and self.gallery_layout(pane) != (pane.gallery_columns, pane.gallery_capacity)):
-            self.show_gallery(pane)
-        return False
-
-    def gallery_selected_paths(self, pane=None):
-        flow = (pane or self.active).gallery_flow
-        paths = []
-        seen = set()
-        for child in sorted(flow.get_selected_children(),
-                            key=lambda item: getattr(item, "gallery_index", -1)):
-            if (hasattr(child, "gallery_index") and not child.is_parent
-                    and child.file_path not in seen):
-                paths.append(child.file_path)
-                seen.add(child.file_path)
-        return paths
-
-    def capture_gallery_key(self, _controller, keyval, _keycode, state):
+    def capture_browser_key(self, _controller, keyval, _keycode, state):
         focus = self.get_focus()
         key = Gdk.keyval_name(keyval)
         if self.top_tab_shortcut(key, state):
@@ -2646,413 +2386,7 @@ class Window(Gtk.ApplicationWindow):
         if key not in {"Left", "Right", "Up", "Down", "Home", "End",
                        "KP_Left", "KP_Right", "KP_Up", "KP_Down", "KP_Home", "KP_End"}:
             return False
-        return self.gallery_key(self.active.gallery_flow, argparse.Namespace(keyval=keyval, state=state))
-
-    def gallery_key(self, flow, event):
-        if self.mode != "gallery" or flow is not self.active.gallery_flow or event.state & (Gdk.ModifierType.CONTROL_MASK
-                | Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.SUPER_MASK):
-            return False
-        key = Gdk.keyval_name(event.keyval)
-        if key in {"Tab", "ISO_Left_Tab"}:
-            self.switch_browser_pane()
-            return True
-        if key not in {"Left", "Right", "Up", "Down", "Home", "End",
-                       "KP_Left", "KP_Right", "KP_Up", "KP_Down", "KP_Home", "KP_End"}:
-            return self.command_key(event)
-        children = self.active.gallery_children_by_logical
-        if not children:
-            return True
-        current = flow.get_focus_child()
-        if current not in children:
-            selected = flow.get_selected_children()
-            current = selected[-1] if selected else next((item for item in children if item is not None), None)
-        if current is None:
-            if key.removeprefix("KP_") in {"Home", "End"}:
-                self.active.gallery_pending_target = 0 if key.removeprefix("KP_") == "Home" else len(children) - 1
-            return True
-        index = current.gallery_index
-        current_layout = (self.active.gallery_columns, self.active.gallery_capacity)
-        new_layout = self.gallery_layout(self.active)
-        capacity = new_layout[1]
-        top = self.gallery_top(self.active)
-        direction = key.removeprefix("KP_")
-        self.active.gallery_pending_target = None
-        if direction == "Home":
-            target_index = 0
-        elif direction == "End":
-            target_index = len(children) - 1
-        elif direction == "Right":
-            target_index = min(index + capacity, len(children) - 1)
-        elif direction == "Left":
-            target_index = index - capacity if index >= capacity else 0
-        elif direction == "Down":
-            target_index = min(index + 1, len(children) - 1)
-        else:
-            target_index = max(index - 1, 0)
-        if direction == "Home":
-            next_top = 0
-        elif direction == "End":
-            next_top = self.gallery_max_top(self.active)
-        elif target_index < top:
-            next_top = max(0, min(target_index, top - capacity))
-        elif target_index >= top + self.active.gallery_columns * capacity:
-            next_top = min(self.gallery_max_top(self.active),
-                           max(top + capacity, target_index - self.active.gallery_columns * capacity + 1))
-        else:
-            next_top = top
-        if new_layout != current_layout:
-            self.show_gallery(self.active)
-            self.active.gallery_pending_target = target_index
-            self.active.gallery_pending_top = next_top
-            return True
-        self.active.gallery_scroll.get_vadjustment().set_value(
-            next_top * self.gallery_geometry(flow, widget_children(flow))[1])
-        target = self.gallery_child_for_index(self.active, target_index, next_top)
-        if target is None:
-            self.active.gallery_pending_target = target_index
-            return True
-        if not event.state & Gdk.ModifierType.SHIFT_MASK:
-            flow.unselect_all()
-        flow.select_child(target)
-        target.grab_focus()
-        self.scroll_gallery_to(target)
-        return True
-
-    def gallery_activated(self, _flow, child):
-        if self.mode != "gallery" or _flow is not self.active.gallery_flow:
-            return
-        if getattr(child, "is_placeholder", False):
-            return
-        if child.is_directory:
-            self.active.navigate(child.file_path)
-        else:
-            self.open_external(child.file_path)
-
-    def show_gallery(self, pane=None):
-        pane = pane or self.active
-        if pane.gallery_resize_source:
-            GLib.source_remove(pane.gallery_resize_source)
-            pane.gallery_resize_source = 0
-        if pane.gallery_scroll.get_allocated_width() <= 1:
-            pane.gallery_build_waiting = True
-            return
-        pane.gallery_build_waiting = False
-        same_folder = pane.gallery_displayed_path == pane.path
-        previous_top = self.gallery_top(pane) if same_folder else 0
-        pane.gallery_columns, pane.gallery_capacity = self.gallery_layout(pane)
-        pane.gallery_serial += 1
-        serial = pane.gallery_serial
-        pane.gallery_building = True
-        flow = pane.gallery_flow
-        old_children = widget_children(flow)
-        focus = self.get_focus()
-        focused_path = focus.file_path if focus in old_children and hasattr(focus, "file_path") else None
-        should_focus_gallery = (pane is self.active and self.mode == "gallery"
-                                and (not same_folder or focus is flow or focus in old_children))
-        flow.set_min_children_per_line(pane.gallery_columns)
-        flow.set_max_children_per_line(pane.gallery_columns)
-        path = pane.path
-        selected_gallery = ([child.file_path for child in flow.get_selected_children()
-                             if hasattr(child, "file_path")]
-                            if same_folder else [])
-        restore_paths = set(selected_gallery) if selected_gallery else set(pane.selected_paths())
-        pane.gallery_displayed_path = path
-        pane.gallery_children_by_logical = []
-        pane.gallery_replicas_by_logical = {}
-        pane.gallery_preview_results = {}
-        pane.gallery_render_waiters = {}
-        pane.gallery_pending_target = None
-        pane.gallery_pending_top = None
-        for child in old_children:
-            flow.remove(child)
-        if should_focus_gallery:
-            flow.grab_focus()
-        if not same_folder:
-            pane.gallery_scroll.get_vadjustment().set_value(0)
-        pane.status.set_text("Loading previews…")
-        if pane is self.active and self.mode == "gallery":
-            self.gallery_flow = flow
-            self.selection = None
-
-        def loaded(rows):
-            if serial != pane.gallery_serial:
-                return
-            entries = [("..", True, 0, path.parent, True)] if path.parent != path else []
-            entries += [(name, directory, size, path / name, False)
-                        for name, directory, _symlink, size, _executable, _modified, _created in rows]
-            restore_paths.intersection_update(entry[3] for entry in entries)
-            pane.gallery_children_by_logical = [None] * len(entries)
-            ordered = []
-            total_rows = (min(len(entries), max(pane.gallery_capacity,
-                          len(entries) - pane.gallery_capacity))
-                          if pane.gallery_columns == 2 else len(entries))
-            for row in range(total_rows):
-                for column in range(pane.gallery_columns):
-                    logical = row + column * pane.gallery_capacity
-                    ordered.append((row, logical, entries[logical])
-                                   if logical < len(entries) else (row, None, None))
-            position = 0
-
-            def add_batch():
-                nonlocal position
-                if serial != pane.gallery_serial:
-                    return False
-                for row, logical, entry in ordered[position:position + 40]:
-                    if logical is None:
-                        self.add_gallery_placeholder(pane)
-                        continue
-                    name, directory, size, target, parent = entry
-                    child = self.add_gallery_tile(pane, name, directory, size, target, parent, serial)
-                    child.gallery_index = logical
-                    child.gallery_row = row
-                    if pane.gallery_children_by_logical[logical] is None:
-                        pane.gallery_children_by_logical[logical] = child
-                    pane.gallery_replicas_by_logical.setdefault(logical, []).append(child)
-                    if target in restore_paths:
-                        flow.select_child(child)
-                        if (should_focus_gallery and (focused_path is None or focused_path == target)
-                                and previous_top <= row < previous_top + pane.gallery_capacity):
-                            child.grab_focus()
-                    elif (not restore_paths and logical == 0
-                          and pane is self.active and self.mode == "gallery"):
-                        flow.select_child(child)
-                        if should_focus_gallery:
-                            child.grab_focus()
-                    if logical == pane.gallery_pending_target:
-                        target_top = pane.gallery_pending_top
-                        if target_top is not None and target_top <= row < target_top + pane.gallery_capacity:
-                            flow.unselect_all()
-                            flow.select_child(child)
-                            if pane is self.active and self.mode == "gallery":
-                                child.grab_focus()
-                            self.scroll_gallery_to(child)
-                            pane.gallery_pending_target = None
-                position += 40
-                if position >= len(ordered):
-                    pane.gallery_building = False
-                    flow.queue_resize()
-                    pane.gallery_scroll.queue_resize()
-                    pane.gallery_overlay.drawing_area.queue_draw()
-                    _columns, pitch, _first_y = self.gallery_geometry(flow, widget_children(flow)) if widget_children(flow) else (1, 1, 0)
-                    pane.gallery_scroll.get_vadjustment().set_value(
-                        min(pane.gallery_pending_top if pane.gallery_pending_top is not None else previous_top,
-                            self.gallery_max_top(pane)) * pitch)
-                    selected = flow.get_selected_children()
-                    if selected:
-                        focused = next((item for item in selected if item.file_path == focused_path), selected[0])
-                        target = self.gallery_child_for_index(pane, focused.gallery_index, previous_top)
-                        if target is not None:
-                            self.scroll_gallery_to(target)
-                            GLib.timeout_add(60, lambda: (self.scroll_gallery_to(target), False)[1]
-                                             if serial == pane.gallery_serial else False)
-                    if should_focus_gallery:
-                        if selected and target is not None:
-                            target.grab_focus()
-                        else:
-                            flow.grab_focus()
-                    elif focus is not None and focus.get_root() is self:
-                        focus.grab_focus()
-                    pane.gallery_pending_top = None
-                    self.gallery_resized(pane)
-                    self.refresh_file_footer(pane)
-                    return False
-                return True
-
-            GLib.idle_add(add_batch)
-
-        loaded(pane.listed_rows)
-
-    @staticmethod
-    def add_gallery_placeholder(pane):
-        child = Gtk.FlowBoxChild()
-        child.is_placeholder = True
-        child.set_size_request(310, 108)
-        child.set_can_focus(False)
-        child.set_sensitive(False)
-        pane.gallery_flow.insert(child, -1)
-        child.show()
-
-    def add_gallery_tile(self, pane, name, directory, size, path, parent, serial):
-        child = Gtk.FlowBoxChild()
-        child.gallery_pane = pane
-        child.file_path, child.is_directory, child.is_parent = path, directory, parent
-        connect_key(child, lambda _child, event, flow=pane.gallery_flow: self.gallery_key(flow, event))
-        connect_click(child, lambda item, event: self.gallery_click(pane, item, event, item))
-        child.set_size_request(310, 108)
-        if parent:
-            parent_tile = Box(orientation=Gtk.Orientation.VERTICAL)
-            parent_tile.add_css_class("gallery-tile")
-            parent_label = Gtk.Label(label="..", xalign=0.5, yalign=0.5)
-            parent_label.add_css_class("gallery-parent")
-            parent_label.set_tooltip_text("Parent directory")
-            parent_tile.pack_start(parent_label, True, True, 0)
-            child.set_child(parent_tile)
-            pane.gallery_flow.insert(child, -1)
-            child.show()
-            return child
-        tile = Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        tile.add_css_class("gallery-tile")
-        preview = Gtk.Stack()
-        preview.set_size_request(92, 80)
-        if directory:
-            image = Gtk.Image.new_from_icon_name("folder")
-        else:
-            guessed_type = Gio.content_type_guess(str(path), None)[0] or "application/octet-stream"
-            type_icon = Gio.content_type_get_icon(guessed_type)
-            image = (Gtk.Image.new_from_gicon(type_icon) if type_icon
-                     else Gtk.Image.new_from_icon_name("text-x-generic"))
-        image.set_pixel_size(64)
-        preview.add_named(image, "image")
-        child.preview_image = image
-        excerpt = Gtk.Label(xalign=0, yalign=0)
-        excerpt.set_size_request(92, 80)
-        excerpt.set_wrap(True)
-        excerpt.add_css_class("gallery-excerpt")
-        preview.add_named(excerpt, "text")
-        tile.pack_start(preview, False, False, 0)
-        details = Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        details.set_hexpand(True)
-        name_label = Gtk.Label(label=name, xalign=0)
-        name_label.add_css_class("gallery-name")
-        if directory:
-            name_label.add_css_class("gallery-folder-name")
-        name_label.set_ellipsize(Pango.EllipsizeMode.END)
-        name_label.set_max_width_chars(22)
-        name_label.set_tooltip_text(str(path))
-        details.pack_start(name_label, False, False, 0)
-        kind_label = Gtk.Label(label="Folder" if directory else self.size(size), xalign=0)
-        kind_label.add_css_class("muted")
-        kind_label.set_ellipsize(Pango.EllipsizeMode.END)
-        details.pack_start(kind_label, False, False, 0)
-        extra_label = Gtk.Label(xalign=0)
-        extra_label.add_css_class("muted")
-        extra_label.set_ellipsize(Pango.EllipsizeMode.END)
-        details.pack_start(extra_label, False, False, 0)
-        tile.pack_start(details, True, True, 0)
-        child.set_child(tile)
-        pane.gallery_flow.insert(child, -1)
-        child.show()
-
-        def render():
-            if serial != pane.gallery_serial:
-                return None
-            modified = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-            if directory:
-                return None, None, "Folder", modified
-            kind = Gio.content_type_guess(str(path), None)[0] or ""
-            description = Gio.content_type_get_description(kind) or "File"
-            summary = f"{description} · {self.size(size)}"
-            if kind.startswith("image/"):
-                try:
-                    _format, width, height = GdkPixbuf.Pixbuf.get_file_info(str(path))
-                    dimensions = f"{width} × {height} px" if width and height else modified
-                    return "image", GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), 92, 80, True), summary, dimensions
-                except Exception:
-                    return "icon", kind, summary, modified
-            if kind == "application/pdf":
-                try:
-                    return "image", pdf_pixbuf(path, 80), summary, modified
-                except Exception:
-                    return "icon", kind, summary, modified
-            if not (kind.startswith("text/") or kind in {
-                    "application/json", "application/xml", "application/javascript",
-                    "application/x-yaml", "application/toml"}):
-                return "icon", kind, summary, modified
-            with path.open("rb") as stream:
-                content = stream.read(350)
-            if b"\0" not in content:
-                words = " ".join(content.decode("utf-8", errors="replace").split())
-                if words:
-                    return "text", "\n".join(textwrap.wrap(words, width=14)[:3]), summary, modified
-            return "icon", kind, summary, modified
-
-        def shown(result):
-            if serial != pane.gallery_serial or result is None:
-                return
-            kind, value, summary, extra = result
-            kind_label.set_text(summary)
-            extra_label.set_text(extra)
-            if kind == "image":
-                image.set_from_pixbuf(value)
-            elif kind == "text":
-                excerpt.set_text(value)
-                preview.set_visible_child_name("text")
-            elif kind == "icon":
-                image.set_from_gicon(Gio.content_type_get_icon(value))
-                image.set_pixel_size(64)
-
-        if path in pane.gallery_preview_results:
-            shown(pane.gallery_preview_results[path])
-        elif path in pane.gallery_render_waiters:
-            pane.gallery_render_waiters[path].append(shown)
-        else:
-            pane.gallery_render_waiters[path] = [shown]
-
-            def delivered(result):
-                if serial != pane.gallery_serial:
-                    return
-                pane.gallery_preview_results[path] = result
-                for callback in pane.gallery_render_waiters.pop(path, ()):
-                    callback(result)
-
-            def failed(_exc):
-                if serial == pane.gallery_serial:
-                    pane.gallery_render_waiters.pop(path, None)
-
-            self.async_call(render, delivered, failed, executor=self.thumbnails_pool)
-        return child
-
-    def read_preview(self, path, width, height):
-        info = path.stat()
-        content_type = Gio.content_type_guess(str(path), None)[0] or "application/octet-stream"
-        directory = path.is_dir()
-        description = "Directory" if directory else Gio.content_type_get_description(content_type) or content_type
-        details = ["Name", path.name, "", "Type", description, content_type,
-                   "", "Size", "—" if directory else f"{self.size(info.st_size)} ({info.st_size:,} bytes)",
-                   "", "Modified", datetime.fromtimestamp(info.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
-                   "", "Permissions", stat.filemode(info.st_mode),
-                   "", "Owner", f"{info.st_uid}:{info.st_gid}",
-                   "", "Location", str(path.parent)]
-        try:
-            file_info = Gio.File.new_for_path(str(path)).query_info(
-                Gio.FILE_ATTRIBUTE_TIME_CREATED, Gio.FileQueryInfoFlags.NOFOLLOW_SYMLINKS, None)
-            if file_info.has_attribute(Gio.FILE_ATTRIBUTE_TIME_CREATED):
-                created = file_info.get_attribute_uint64(Gio.FILE_ATTRIBUTE_TIME_CREATED)
-                details += ["", "Created", datetime.fromtimestamp(created).strftime("%Y-%m-%d %H:%M:%S")]
-        except GLib.Error:
-            pass
-        try:
-            filesystem = os.statvfs(path)
-            details += ["", "Available on filesystem",
-                        self.size(filesystem.f_bavail * filesystem.f_frsize)]
-        except OSError:
-            pass
-        if path.is_symlink():
-            details += ["", "Link target", os.readlink(path)]
-        try:
-            if directory:
-                with os.scandir(path) as entries:
-                    count = sum(1 for _entry in entries)
-                details += ["", "Entries", str(count)]
-                return "text", "Directory\n\nPress Enter to browse it.", "\n".join(details)
-            if content_type.startswith("image/"):
-                _format, image_width, image_height = GdkPixbuf.Pixbuf.get_file_info(str(path))
-                details += ["", "Dimensions", f"{image_width} × {image_height} px"]
-                result = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), width, height, True)
-                return "image", result, "\n".join(details)
-            if content_type == "application/pdf":
-                details += ["", "Preview", "First page"]
-                return "image", pdf_pixbuf(path, max(width, height)), "\n".join(details)
-            with path.open("rb") as stream:
-                content = stream.read(300001)
-            if b"\0" in content:
-                result = "No built-in preview for this file.\n\nPress F4 to open it in its application."
-            else:
-                result = content[:300000].decode("utf-8", errors="replace")
-                result += "\n\n[Preview truncated]" if len(content) > 300000 else ""
-            return "text", result, "\n".join(details)
-        except Exception as exc:
-            return "text", f"Preview unavailable: {exc}\n\nPress F4 to open it in its application.", "\n".join(details)
+        return self.active.gallery.key(self.active.gallery.flow, argparse.Namespace(keyval=keyval, state=state))
 
     def preview(self, path=None):
         path = path or self.selection
@@ -3081,7 +2415,7 @@ class Window(Gtk.ApplicationWindow):
             self.preview_stack.set_visible_child_name(kind)
             self.inspector_details.set_text(details)
             self.status.set_text(str(path))
-        self.async_call(lambda: self.read_preview(path, 1200, 860), show,
+        self.async_call(lambda: read_preview(path, 1200, 860), show,
             lambda exc: self.document.get_buffer().set_text(f"Cannot inspect {path.name}: {exc}") if serial == self.preview_serial else None)
 
     def close_inspector(self):
@@ -3278,7 +2612,7 @@ class Window(Gtk.ApplicationWindow):
                 dialog.destroy()
                 if pane.path == folder:
                     pane.navigate(folder, selected_name=name)
-                    (pane.gallery_flow if self.mode == "gallery" else pane.view).grab_focus()
+                    (pane.gallery.flow if self.mode == "gallery" else pane.view).grab_focus()
 
             def failed(exc):
                 nonlocal creating
@@ -3314,7 +2648,7 @@ class Window(Gtk.ApplicationWindow):
 
     def delete(self):
         pane = self.active
-        sources = self.gallery_selected_paths() if self.mode == "gallery" else pane.operation_paths()
+        sources = self.active.gallery.selected_paths() if self.mode == "gallery" else pane.operation_paths()
         sources = [Path(source) for source in sources]
         if not sources:
             self.status.set_text("Select a file or mark files to delete (Insert or Ctrl+T).")
@@ -3411,7 +2745,7 @@ class Window(Gtk.ApplicationWindow):
         def restore_focus():
             pane = self.panes[job.source_pane_index]
             if pane is self.active and self.mode in {"files", "gallery"}:
-                (pane.gallery_flow if self.mode == "gallery" else pane.view).grab_focus()
+                (pane.gallery.flow if self.mode == "gallery" else pane.view).grab_focus()
             return False
 
         def finish():
@@ -3469,7 +2803,7 @@ class Window(Gtk.ApplicationWindow):
         return self.transfer_dialog("move", same_folder)
 
     def transfer_dialog(self, operation, same_folder=False):
-        sources = self.gallery_selected_paths() if self.mode == "gallery" else (
+        sources = self.active.gallery.selected_paths() if self.mode == "gallery" else (
             [self.active.current_path()] if same_folder else self.active.operation_paths())
         sources = [Path(source) for source in sources if source is not None]
         if not sources:
