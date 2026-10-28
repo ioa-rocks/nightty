@@ -7,9 +7,11 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import time
+from unittest.mock import patch
 
-from .app import Gdk, Gio, GLib, Gtk, Window
+from .app import Gdk, Gio, GLib, Gtk, Window, widget_children
 from .model import State
 
 
@@ -24,6 +26,7 @@ def parser():
     result.add_argument("--maximized", action="store_true", help="open the window maximized")
     result.add_argument("--toggle", action="store_true", help="show or hide the running window")
     result.add_argument("--smoke", action="store_true", help="exercise disposable native fixtures and save screenshots")
+    result.add_argument("--smoke-controls", action="store_true", help="check pane menus with disposable native fixtures")
     return result
 
 
@@ -78,7 +81,7 @@ class Application(Gtk.Application):
         return 0
 
 
-def smoke(args):
+def smoke(args, controls_only=False):
     """Runs the real widgets with local fixtures, fake agents and one fixture shell."""
     import cairo
     from .app import Pango, Vte
@@ -135,6 +138,7 @@ def smoke(args):
         (child / "0-日本語.txt").write_text("Japanese filename\n")
         for index in range(80):
             (child / f"note-{index:02}.txt").write_text(f"Note {index}\n")
+        (child / "note-16-日本語.txt").write_text("Japanese name in the right column\n")
         image = cairo.ImageSurface(cairo.FORMAT_ARGB32, 900, 480)
         drawing = cairo.Context(image)
         drawing.set_source_rgb(.12, .20, .29)
@@ -161,15 +165,39 @@ def smoke(args):
         app.client = fake
         checks = []
         step = {"number": 0, "ticks": 0}
+        slow_continue = threading.Event()
 
-        def screenshot(name):
+        def screenshot(name, retry=0):
+            from gi.repository import Gsk, Graphene
             window = app.window
-            window.check_resize()
-            width, height = window.get_allocated_width(), window.get_allocated_height()
-            surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-            window.draw(cairo.Context(surface))
-            surface.write_to_png("/tmp/workspace-" + name + ".png")
-            return surface
+            width, height = window.get_child().get_width(), window.get_child().get_height()
+            snapshot = Gtk.Snapshot.new()
+            paintable = window.smoke_paintable
+            paintable.snapshot(snapshot, width, height)
+            node = snapshot.to_node()
+            if node is None:
+                if retry < 10:
+                    window.get_child().queue_draw()
+                    GLib.timeout_add(50, lambda: (screenshot(name, retry + 1), False)[1])
+                return None
+            renderer = Gsk.Renderer.new_for_surface(window.get_surface())
+            assert renderer is not None
+            bounds = Graphene.Rect().init(0, 0, width, height)
+            texture = renderer.render_texture(node, bounds)
+            renderer.unrealize()
+            texture.save_to_png("/tmp/workspace-" + name + ".png")
+            downloader = Gdk.TextureDownloader.new(texture)
+            downloader.set_format(Gdk.MemoryFormat.B8G8R8A8_PREMULTIPLIED)
+            pixels, stride = downloader.download_bytes()
+
+            class Pixels:
+                def get_stride(self):
+                    return stride
+
+                def get_data(self):
+                    return pixels.get_data()
+
+            return Pixels()
 
         def run():
             try:
@@ -180,12 +208,16 @@ def smoke(args):
                                          f"path={getattr(current, 'path', None)} "
                                          f"count={current.count.get_text() if current else None} "
                                          f"cursor={current.view.get_cursor() if current else None} "
+                                         f"focus={app.window.get_focus() if app.window else None} "
+                                         f"right_entries={len(app.window.panes[1].entries) if app.window and app.window.panes else None} "
                                          f"geometry={current.geometry_measured if current else None} "
                                          f"capacity={(current.capacity, current.visible_capacity()) if current else None} "
                                          f"allocations={(current.view.get_allocated_width(), current.view.get_allocated_height()) if current else None} "
                                          f"stack={current.content_stack.get_visible_child_name() if current else None} "
                                          f"scroll={current.scroll.get_vadjustment().get_value() if current else None} "
                                          f"selected={current.selected_paths() if current else None} "
+                                         f"gallery={(current.gallery_columns, current.gallery_capacity, app.window.gallery_layout(current), current.gallery_resize_source, current.gallery_building, len(current.gallery_children_by_logical)) if current and getattr(current, 'gallery_flow', None) else None} "
+                                         f"gallery_scroll={(current.gallery_scroll.get_vadjustment().get_upper(), current.gallery_scroll.get_vadjustment().get_page_size(), current.gallery_scroll.get_vadjustment().get_value(), len(widget_children(current.gallery_flow)), [(item.gallery_row, item.get_allocation().y) for item in current.gallery_flow.get_selected_children()]) if current and getattr(current, 'gallery_flow', None) else None} "
                                          f"quick={app.window.quick_details.get_text() if app.window and app.window.quick_enabled else None} "
                                          f"command_ready={getattr(getattr(app.window, 'command_terminal', None), 'workspace_ready', None)} "
                                          f"command_pending={getattr(getattr(app.window, 'command_terminal', None), 'workspace_pending', None)} "
@@ -202,7 +234,7 @@ def smoke(args):
                     assert len(window.terminals) == 1
                     assert len(window.terminal_tab_bar.get_children()) == 1
                     assert not window.terminal_tabs.get_show_tabs()
-                    assert window.terminals[0][0].workspace_tab_button.get_style_context().has_class("top-tab-active")
+                    assert window.terminals[0][0].workspace_tab_button.has_css_class("top-tab-active")
                     assert window.file_panes is None and not window.panes
                     assert window.gallery_flow is None
                     assert not hasattr(window, "regime_button")
@@ -215,14 +247,14 @@ def smoke(args):
                     checks.append("shell startup leaves Files and Gallery unloaded")
                     screenshot("terminal-start")
                     assert window.get_focus() is window.terminals[0][0]
-                    key_event = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
-                    key_event.window = window.terminals[0][0].get_window()
-                    key_event.keyval = Gdk.KEY_o
-                    key_event.state = Gdk.ModifierType.CONTROL_MASK
-                    assert window.terminals[0][0].event(key_event)
+                    assert window.terminal_shortcut(window.terminals[0][0],
+                        argparse.Namespace(keyval=Gdk.KEY_o, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "files"
                     assert window.file_panes is not None and len(window.panes) == 2
                     assert window.gallery_flow is None
+                    expected_first_width = max(120, (window.stack.get_width() // 2 - 40) // 2)
+                    assert all(pane.view.get_item_width() >= expected_first_width
+                               for pane in window.panes)
                     step["startup_checked"] = True
                     return True
                 if step["number"] == 0 and (not window.context or len(window.panes[0].store) < 5
@@ -232,11 +264,301 @@ def smoke(args):
                                             or any(" free" not in pane.folder_stats.get_text()
                                                    for pane in window.panes)
                                             or not window.panes[0].geometry_measured
-                                            or window.panes[0].capacity != window.panes[0].visible_capacity()):
+                                            or window.panes[0].view.get_cell_rect(
+                                                Gtk.TreePath.new_from_indices([0]), None)[1].y < 0
+                                            or window.panes[0].capacity != window.panes[0].visible_capacity()
+                                            or window.file_panes.get_width() < 2
+                                            or abs(window.file_panes.get_position() /
+                                                   window.file_panes.get_width() - .5) >= .02):
                     return True
+                if controls_only and step["number"] == 0:
+                    pane = window.panes[0]
+                    assert window.workspace_button.get_label() == "Commander ▾"
+                    assert pane.sort_button.get_label() == "n"
+                    assert pane.view_button.get_icon_name() == "view-list-symbolic"
+                    assert pane.sort_button.get_next_sibling() is pane.view_button
+                    assert pane.view_button.get_next_sibling() is pane.location_bar
+                    assert pane.location_bar.get_child() is pane.location
+                    assert pane.locations_button.get_parent() is pane.location_bar
+                    assert pane.find_button.get_parent() is pane.location_bar
+                    assert isinstance(pane.find_button.get_child(), Gtk.Image)
+                    assert "Alt+F7" in pane.find_button.get_tooltip_text()
+                    assert pane.search.get_placeholder_text() == "Go to filename in this folder"
+                    star_before = pane.locations_button.get_icon_name()
+                    pane.favourite()
+                    assert pane.locations_button.get_icon_name() != star_before
+                    pane.favourite()
+                    assert pane.locations_button.get_icon_name() == star_before
+                    pane.set_sort("size")
+                    assert pane.sort_button.get_label() == "s"
+                    pane.set_sort("size")
+                    assert pane.sort_button.get_label() == "S"
+                    pane.set_sort("name")
+                    assert pane.sort_button.get_label() == "n"
+                    screenshot("files-controls")
+                    pane.sort_button.emit("clicked")
+                    step["number"] = 35
+                    return True
+                if controls_only and step["number"] == 35:
+                    pane = window.panes[0]
+                    sort_menu = pane.sort_button.nightty_popover
+                    assert sort_menu.nightty_category == "sort"
+                    assert sort_menu.get_parent() is pane.sort_button
+                    assert sort_menu.get_has_arrow()
+                    assert sort_menu.get_child().get_first_child() is sort_menu.nightty_scroller
+                    assert window.get_focus() is sort_menu.nightty_items[0]
+                    sort_menu.popdown()
+                    window.focus_active_browser()
+                    window.show_workspace_menu()
+                    assert any("Project" in item.get_label()
+                               for item in window.workspace_button.nightty_popover.nightty_items)
+                    window.workspace_button.nightty_popover.popdown()
+                    window.state.save(favourites=[str(child / f"bookmark-{index:02d}")
+                                                  for index in range(28)])
+                    gvfs_root = f"/run/user/{os.getuid()}/gvfs"
+                    native_is_dir, native_scandir = Path.is_dir, os.scandir
+
+                    def no_gvfs_stat(path, *args, **kwargs):
+                        assert os.fspath(path) != gvfs_root, "popup must not stat GVfs on the UI thread"
+                        return native_is_dir(path, *args, **kwargs)
+
+                    def no_gvfs_scan(path):
+                        assert os.fspath(path) != gvfs_root, "popup must not scan GVfs on the UI thread"
+                        return native_scandir(path)
+
+                    with patch.object(Path, "is_dir", no_gvfs_stat), patch.object(os, "scandir", no_gvfs_scan):
+                        assert window.key(window, argparse.Namespace(
+                            keyval=Gdk.KEY_F1, state=Gdk.ModifierType.CONTROL_MASK))
+                        first_menu = pane.locations_button.nightty_popover
+                        assert window.key(window, argparse.Namespace(
+                            keyval=Gdk.KEY_F1, state=Gdk.ModifierType.CONTROL_MASK))
+                        assert first_menu.get_parent() is None
+                    menu = pane.locations_button.nightty_popover
+                    assert menu.nightty_category == "location"
+                    assert any(item.get_label() == "Home" for item in menu.nightty_items)
+                    assert any("current folder" in item.get_label() for item in menu.nightty_items)
+                    assert isinstance(menu.nightty_scroller.get_child(), Gtk.Viewport)
+                    step["number"] = 36
+                    return True
+                if controls_only and step["number"] == 36:
+                    pane = window.panes[0]
+                    menu = pane.locations_button.nightty_popover
+                    for _ in menu.nightty_items:
+                        assert window.pane_menu_key(pane, menu, pane.locations_button, menu,
+                            argparse.Namespace(keyval=Gdk.KEY_Down, state=0))
+                        assert window.get_focus() in menu.nightty_items
+                    assert not pane.view.has_focus()
+                    step["number"] = 37
+                    return True
+                if controls_only and step["number"] == 37:
+                    pane = window.panes[0]
+                    menu = pane.locations_button.nightty_popover
+                    adjustment = menu.nightty_scroller.get_vadjustment()
+                    assert adjustment.get_value() > 0, (adjustment.get_upper(),
+                        adjustment.get_page_size(), adjustment.get_value(),
+                        window.get_focus(), menu.nightty_scroller.get_allocated_height())
+                    focused = window.get_focus()
+                    position = focused.translate_coordinates(menu.nightty_content, 0, 0)
+                    focused_top = position[-1]
+                    assert adjustment.get_value() <= focused_top
+                    assert focused_top + focused.get_allocated_height() <= (
+                        adjustment.get_value() + adjustment.get_page_size())
+                    assert window.pane_menu_key(pane, menu, pane.locations_button, menu,
+                        argparse.Namespace(keyval=Gdk.KEY_Left, state=0))
+                    step["number"] = 38
+                    return True
+                if controls_only and step["number"] == 38:
+                    pane = window.panes[0]
+                    menu = pane.view_button.nightty_popover
+                    assert menu.nightty_category == "view"
+                    assert menu.get_parent() is pane.view_button and menu.get_has_arrow()
+                    assert window.get_focus() is menu.nightty_items[0]
+                    assert any("Gallery" in item.get_label() for item in menu.nightty_items)
+                    assert window.pane_menu_key(pane, menu, pane.view_button, menu,
+                        argparse.Namespace(keyval=Gdk.KEY_Left, state=0))
+                    step["number"] = 39
+                    return True
+                if controls_only and step["number"] == 39:
+                    pane = window.panes[0]
+                    menu = pane.sort_button.nightty_popover
+                    assert menu.nightty_category == "sort" and menu.get_parent() is pane.sort_button
+                    assert window.pane_menu_key(pane, menu, pane.sort_button, menu,
+                        argparse.Namespace(keyval=Gdk.KEY_Right, state=0))
+                    step["number"] = 40
+                    return True
+                if controls_only and step["number"] == 40:
+                    pane = window.panes[0]
+                    menu = pane.view_button.nightty_popover
+                    assert menu.nightty_category == "view" and menu.get_parent() is pane.view_button
+                    assert window.pane_menu_key(pane, menu, pane.view_button, menu,
+                        argparse.Namespace(keyval=Gdk.KEY_Right, state=0))
+                    step["number"] = 41
+                    return True
+                if controls_only and step["number"] == 41:
+                    pane = window.panes[0]
+                    menu = pane.locations_button.nightty_popover
+                    assert menu.nightty_category == "location"
+                    assert menu.get_parent() is pane.locations_button and menu.get_has_arrow()
+                    checks.append("visible mode, location, view, and reversible sort controls")
+                    checks.append("location choices retain visible focus while moving down")
+                    checks.append("popup keys follow Sort, View, Favourites order")
+                    menu.popdown()
+                    pane.focus_file_path(child / "draft.md")
+                    dialog = window.copy()
+                    assert isinstance(dialog, Gtk.Window)
+                    step["copy_dialog"] = dialog
+                    step["number"] = 42
+                    return True
+                if controls_only and step["number"] == 42:
+                    dialog = step["copy_dialog"]
+                    choices = widget_children(dialog.get_child().get_last_child())
+                    assert [choice.get_label() for choice in choices] == ["_Yes", "_Background", "_Cancel"]
+                    assert dialog.get_default_widget() is choices[0]
+                    assert dialog.get_focus() is choices[0]
+                    assert all(choice.get_receives_default() for choice in choices)
+                    assert choices[0].has_css_class("mc-dialog-focused")
+                    choices[1].grab_focus()
+                    step["number"] = 43
+                    return True
+                if controls_only and step["number"] == 43:
+                    dialog = step["copy_dialog"]
+                    choices = widget_children(dialog.get_child().get_last_child())
+                    assert dialog.get_focus() is choices[1]
+                    assert not choices[0].has_css_class("mc-dialog-focused")
+                    assert choices[1].has_css_class("mc-dialog-focused")
+                    dialog.destroy()
+                    checks.append("copy dialog focus fill follows the selected action")
+                    step["same_folder_dialog"] = window.copy(same_folder=True)
+                    step["number"] = 44
+                    return True
+                if controls_only and step["number"] in {44, 45}:
+                    dialog = step["same_folder_dialog"]
+                    fields = widget_children(dialog.get_child())[1]
+                    destination = widget_children(fields)[3]
+                    source = child / "draft.md"
+                    assert destination.get_text() == str(source)
+                    focus = dialog.get_focus()
+                    assert focus is destination or focus.get_parent() is destination
+                    assert destination.get_selection_bounds()[-2:] == (
+                        len(str(source.parent)) + 1, len(str(source)))
+                    if step["number"] == 45:
+                        destination.set_text("")
+                        destination.emit("activate")
+                        error = widget_children(dialog.get_child())[3]
+                        assert error.get_visible() and error.get_text() == "Enter a destination."
+                    dialog.destroy()
+                    if step["number"] == 44:
+                        step["same_folder_dialog"] = window.move(same_folder=True)
+                        step["number"] = 45
+                        return True
+                    checks.append("same-folder copy and rename focus the selected destination filename; Enter runs Yes")
+                    job = window.start_transfer([child / "draft.md"], output, background=False)
+                    step["foreground_job"] = job
+                    step["foreground_dialog"] = window.show_transfer_progress(job)
+                    step["number"] = 46
+                    return True
+                if controls_only and step["number"] == 46:
+                    job = step["foreground_job"]
+                    assert job.status in {"queued", "copying", "completed"}, (job.status, job.error)
+                    if job.status != "completed" or step["foreground_dialog"].get_visible():
+                        return True
+                    assert (output / "draft.md").read_bytes() == (child / "draft.md").read_bytes()
+                    checks.append("successful foreground copy closes its progress dialog")
+                    job = window.start_transfer([child / "draft.md"], output, background=False)
+                    step["foreground_job"] = job
+                    step["foreground_dialog"] = window.show_transfer_progress(job)
+                    step["number"] = 47
+                    return True
+                if controls_only and step["number"] == 47:
+                    job = step["foreground_job"]
+                    if job.status in {"queued", "copying"} or getattr(job, "conflict_dialog", None) is None:
+                        return True
+                    assert job.status == "conflict" and job.conflict is not None
+                    conflict_dialog = job.conflict_dialog
+                    rows = widget_children(conflict_dialog.get_child())[2:]
+                    choices = [choice for row in rows for choice in widget_children(row)]
+                    assert [choice.get_label() for choice in choices] == [
+                        "_Yes", "_No", "_Abort", "_All", "N_one", "Size _differs",
+                        "If _older", "If _smaller"]
+                    assert conflict_dialog.get_default_widget() is choices[0]
+                    choices[1].emit("clicked")
+                    step["number"] = 48
+                    return True
+                if controls_only and step["number"] == 48:
+                    job = step["foreground_job"]
+                    if job.status != "completed" or step["foreground_dialog"].get_visible():
+                        return True
+                    assert job.skipped == 1
+                    assert (output / "draft.md").read_bytes() == (child / "draft.md").read_bytes()
+                    checks.append("foreground conflict offers MC overwrite choices and No skips one file")
+                    step["background_job"] = window.start_transfer(
+                        [child / "draft.md"], output, background=True)
+                    step["number"] = 49
+                    return True
+                if controls_only and step["number"] == 49:
+                    job = step["background_job"]
+                    if job.status in {"queued", "copying"}:
+                        return True
+                    assert job.status == "conflict" and job.conflict is not None
+                    window.update_transfers()
+                    assert window.transfers_button.has_css_class("transfer-alert")
+                    window.show_jobs()
+                    choices = [choice for row in widget_children(job.conflict_dialog.get_child())[2:]
+                               for choice in widget_children(row)]
+                    choices[5].emit("clicked")
+                    step["number"] = 50
+                    return True
+                if controls_only and step["number"] == 50:
+                    job = step["background_job"]
+                    if job.status != "completed":
+                        return True
+                    assert job.skipped == 1
+                    window.update_transfers()
+                    assert not window.transfers_button.has_css_class("transfer-alert")
+                    checks.append("background conflict alerts in Transfers and Size differs skips equal files")
+                    pane = window.panes[0]
+                    pane.navigate(child)
+                    while pane.path != Path("/"):
+                        pane.up()
+                    step["number"] = 51
+                    return True
+                if controls_only and step["number"] == 51:
+                    pane = window.panes[0]
+                    if (pane.path != Path("/") or "loading" in pane.count.get_text().lower()
+                            or pane.model_fill_source or not pane.geometry_measured):
+                        return True
+                    target_index = min(pane.capacity - 1, len(pane.entries) - 1)
+                    assert target_index > 4
+                    target = Path(pane.entries[target_index][3])
+                    pane.focus_file_path(target)
+                    step["number"] = 52
+                    return True
+                if controls_only and step["number"] == 52:
+                    pane = window.panes[0]
+                    cursor = pane.view.get_cursor()[1]
+                    assert cursor is not None and pane.view.path_is_selected(cursor)
+                    found, rect = pane.view.get_cell_rect(cursor, None)
+                    assert found
+                    row_y = rect.y + pane.item_pitch() // 2 - pane.scroll.get_vadjustment().get_value()
+                    assert row_y < pane.column_visible_bottom(
+                        pane.scroll_overlay.drawing_area.get_allocated_height())
+                    surface = screenshot("rapid-up-root")
+                    assert surface is not None
+                    x, y = pane.view.translate_coordinates(window.get_child(),
+                        rect.x + pane.view.get_item_width() // 2, rect.y + pane.item_pitch() // 2)
+                    pixel = bytes(surface.get_data())[(int(y) * surface.get_stride() + int(x) * 4):
+                                                       (int(y) * surface.get_stride() + int(x) * 4 + 4)]
+                    accent = window.palette["accent"]
+                    assert pixel[:3] == bytes.fromhex(accent[5:7] + accent[3:5] + accent[1:3]), pixel
+                    checks.append("rapid Up navigation to root keeps lower rows and cursor visible")
+                    app.quit()
+                    return False
                 if step["number"] == 0 and not step.get("footer_checked"):
                     if not step.get("footer_check_started"):
-                        window.panes[0].status.set_text("ドラレコ　人身事故　子ども飛び出し.webm")
+                        step["footer_before"] = (window.panes[0].status_box.get_height(),
+                                                 window.panes[0].scroll.get_height(),
+                                                 window.panes[0].capacity)
+                        window.panes[0].status.set_text("搭乗用バーコード登録 - JAL国内線予約 (1)")
                         step["footer_check_started"] = True
                         return True
                     left, right = window.panes
@@ -244,10 +566,11 @@ def smoke(args):
                     right_y = right.list_end.translate_coordinates(window.file_panes, 0, 0)[1]
                     assert left_y == right_y, (left_y, right_y,
                         left.status_box.get_allocated_height(), right.status_box.get_allocated_height())
+                    assert (left.status_box.get_height(), left.scroll.get_height(), left.capacity) == step["footer_before"]
                     screenshot("footer-japanese")
                     window.refresh_file_footer(left)
                     step["footer_checked"] = True
-                    checks.append("Japanese footer text keeps both pane bottom lines aligned")
+                    checks.append("Japanese footer text keeps height and both pane bottom lines stable")
                 number = step["number"]
                 if number == 0:
                     assert window.get_focus() is window.panes[0].view, (
@@ -343,11 +666,28 @@ def smoke(args):
                         row_rects.append(rect)
                     assert all(rect.height == row_rects[0].height
                                and rect.y == row_rects[0].y + row * pane.item_pitch()
-                               for row, rect in enumerate(row_rects))
+                               for row, rect in enumerate(row_rects)), (
+                                   pane.item_pitch(), pane.capacity, pane.view.get_item_width(),
+                                   [(rect.y, rect.height) for rect in row_rects])
                     viewport = pane.scroll.get_vadjustment().get_page_size()
-                    assert row_rects[-2].y + row_rects[-2].height <= viewport
-                    assert row_rects[-1].y + row_rects[-1].height > viewport
-                    checks.append("Japanese filename keeps every file row at the precomputed height")
+                    assert row_rects[-2].y + pane.item_pitch() <= viewport
+                    assert row_rects[-1].y + pane.item_pitch() > viewport
+                    japanese_right = next(i for i, entry in enumerate(pane.entries)
+                                          if entry[1] == "note-16-日本語.txt")
+                    assert pane.capacity <= japanese_right < 2 * pane.capacity
+                    left_partner = pane.store_position(japanese_right - pane.capacity, 0)
+                    left_path = Gtk.TreePath.new_from_indices([left_partner])
+                    pane.view.unselect_all()
+                    pane.view.set_cursor(left_path, None, False)
+                    pane.view.select_path(left_path)
+                    footer_height = pane.status_box.get_height()
+                    assert pane.move_by_key(pane.view, argparse.Namespace(keyval=Gdk.KEY_Right, state=0))
+                    assert pane.cursor_logical() == japanese_right
+                    assert len(pane.view.get_selected_items()) == 1
+                    assert pane.selected_paths() == [child / "note-16-日本語.txt"]
+                    assert pane.status_box.get_height() == footer_height
+                    checks.append("Japanese filenames keep row height and one right-column cursor")
+                    pane.view.unselect_all()
                     step["capacity"] = pane.capacity
                     left_bottom = pane.store_position(pane.capacity - 1, 0)
                     pane.view.set_cursor(Gtk.TreePath.new_from_indices([left_bottom]), None, False)
@@ -413,8 +753,8 @@ def smoke(args):
                     pane.view.set_cursor(visible_path, None, False)
                     pane.view.select_path(visible_path)
                     pane.selected()
-                    assert all(pane.view.path_is_selected(Gtk.TreePath.new_from_indices([i]))
-                               for i in positions)
+                    assert [i for i in positions if pane.view.path_is_selected(
+                        Gtk.TreePath.new_from_indices([i]))] == [positions[0]]
                     adjustment.set_value(6 * pane.item_pitch())
                     pane.snap_scroll()
                     pane.view.unselect_path(Gtk.TreePath.new_from_indices([positions[1]]))
@@ -453,11 +793,12 @@ def smoke(args):
                     assert pane.search_result.get_text() == "1 found"
                     screenshot("search")
                     pane.hide_search()
-                    checks.append("explicit inline filename search")
+                    checks.append("Alt+S quick goto finds a filename in the active pane")
                     window.add_favourite()
                     assert child.resolve() in window.state.favourites
                     locations = window.build_locations_menu(window.panes[0])
-                    assert any(item.get_label() == str(child.resolve()) for item in locations.get_children() if hasattr(item, "get_label"))
+                    assert any(item.get_label() == str(child.resolve())
+                               for item in locations.nightty_items)
                     window.add_favourite()
                     assert not window.state.favourites
                     window.add_favourite()
@@ -475,7 +816,7 @@ def smoke(args):
                 elif number == 1:
                     if window.panes[0].capacity != window.panes[0].visible_capacity():
                         return True
-                    if (window.quick_image.get_pixbuf() is None
+                    if (window.quick_image.get_paintable() is None
                             or "900 × 480 px" not in window.quick_details.get_text()):
                         return True
                     assert window.right_stack.get_visible_child_name() == "quick"
@@ -495,7 +836,7 @@ def smoke(args):
                     assert window.get_focus() is window.gallery_flow
                     step["number"] = 2
                 elif number == 2:
-                    window.check_resize()
+                    window.queue_resize()
                     pane = window.active
                     if pane.gallery_resize_source:
                         return True
@@ -506,15 +847,15 @@ def smoke(args):
                                if item is not None and item.file_path.name == "visual.png"]
                     pdf_cards = [item for item in window.active.gallery_children_by_logical
                                  if item is not None and item.file_path.name == "sample.pdf"]
-                    if (not matches or matches[0].preview_image.get_pixbuf() is None
-                            or not pdf_cards or pdf_cards[0].preview_image.get_pixbuf() is None):
+                    if (not matches or matches[0].preview_image.get_paintable() is None
+                            or not pdf_cards or pdf_cards[0].preview_image.get_paintable() is None):
                         return True
                     assert pane.gallery_columns == 2
-                    assert pdf_cards[0].preview_image.get_pixbuf().get_height() <= 80
-                    if pane.gallery_flow.get_children()[0].get_allocated_height() < 108:
+                    assert pdf_cards[0].preview_image.get_paintable().get_intrinsic_height() <= 80
+                    if widget_children(pane.gallery_flow)[0].get_allocated_height() < 108:
                         return True
-                    assert pane.gallery_flow.get_children()[0].get_allocated_height() == 108, (
-                        pane.gallery_flow.get_children()[0].get_allocated_height(),
+                    assert widget_children(pane.gallery_flow)[0].get_allocated_height() == 108, (
+                        widget_children(pane.gallery_flow)[0].get_allocated_height(),
                         pdf_cards[0].get_allocated_height())
                     if not step.get("gallery_entry_rebuild_started"):
                         assert pane.gallery_serial == 1
@@ -526,41 +867,48 @@ def smoke(args):
                         return True
                     if pane.gallery_building or pane.gallery_resize_source:
                         return True
-                    assert window.get_focus() is window.command_entry
+                    assert window.get_focus().get_ancestor(Gtk.Entry) is window.command_entry
                     window.focus_active_browser()
                     checks.append("gallery rebuild leaves command entry focus intact")
-                    parent_tile = window.gallery_flow.get_children()[0]
+                    parent_tile = widget_children(window.gallery_flow)[0]
                     assert parent_tile.is_parent and isinstance(parent_tile.get_child(), Gtk.Box)
                     assert parent_tile.get_child().get_children()[0].get_text() == ".."
                     parent_label = parent_tile.get_child().get_children()[0]
-                    window.check_resize()
+                    window.queue_resize()
                     before = parent_label.translate_coordinates(window.gallery_flow, 0, 0)
                     window.gallery_flow.select_child(parent_tile)
-                    window.check_resize()
+                    window.queue_resize()
                     assert parent_label.translate_coordinates(window.gallery_flow, 0, 0) == before, (
                         before, parent_label.translate_coordinates(window.gallery_flow, 0, 0))
                     parent_tile.grab_focus()
                     assert window.gallery_key(window.gallery_flow,
                         argparse.Namespace(keyval=Gdk.KEY_Left, state=0))
-                    assert window.gallery_flow.get_selected_children() == [parent_tile]
+                    assert (parent_tile in window.gallery_flow.get_selected_children()
+                            and all(item.gallery_index == 0 for item in window.gallery_flow.get_selected_children())), (
+                                [(item.gallery_index, item.gallery_row) for item in window.gallery_flow.get_selected_children()],
+                                window.gallery_top(window.active), window.gallery_flow.get_focus_child())
                     assert window.gallery_key(window.gallery_flow,
                         argparse.Namespace(keyval=Gdk.KEY_Right, state=0))
                     assert window.gallery_flow.get_selected_children()[0] is window.active.gallery_children_by_logical[
                         window.active.gallery_capacity]
                     assert window.gallery_key(window.gallery_flow,
                         argparse.Namespace(keyval=Gdk.KEY_Left, state=0))
-                    assert window.gallery_flow.get_selected_children() == [parent_tile]
+                    assert (parent_tile in window.gallery_flow.get_selected_children()
+                            and all(item.gallery_index == 0 for item in window.gallery_flow.get_selected_children()))
                     assert window.capture_gallery_key(None, Gdk.KEY_End, 0, Gdk.ModifierType(0))
                     assert window.gallery_selected_paths() == [child / "zz-track.mp3"]
                     assert window.capture_gallery_key(None, Gdk.KEY_Home, 0, Gdk.ModifierType(0))
-                    assert window.gallery_flow.get_selected_children() == [parent_tile]
+                    assert (parent_tile in window.gallery_flow.get_selected_children()
+                            and all(item.gallery_index == 0 for item in window.gallery_flow.get_selected_children())), (
+                                [(item.gallery_index, item.gallery_row) for item in window.gallery_flow.get_selected_children()],
+                                window.gallery_top(window.active), window.gallery_flow.get_focus_child())
                     checks.append("Home and End reach both ends of the gallery")
                     window.gallery_flow.unselect_all()
                     audio_tile = next(item for item in window.active.gallery_children_by_logical
                                       if item is not None and item.file_path.name == "zz-track.mp3")
                     if audio_tile.preview_image.get_storage_type() != Gtk.ImageType.GICON:
                         return True
-                    assert audio_tile.preview_image.get_gicon()[0].equal(
+                    assert audio_tile.preview_image.get_gicon().equal(
                         Gio.content_type_get_icon(Gio.content_type_guess(str(child / "zz-track.mp3"), None)[0]))
                     window.scroll_gallery_to(matches[0])
                     if window.active.gallery_scroll.get_vadjustment().get_value() <= 0:
@@ -589,31 +937,38 @@ def smoke(args):
                     assert focus is window.gallery_flow or focus.is_ancestor(window.gallery_flow)
                     checks.append("Tab keeps focus in mixed Gallery and Files panes")
                     window.active.gallery_scroll.get_vadjustment().set_value(0)
-                    surface = screenshot("gallery-top")
+                    step["number"] = 2.5
+                    return True
+                elif number == 2.5:
                     gallery_pane = window.active
+                    matches = [item for item in gallery_pane.gallery_children_by_logical
+                               if item is not None and item.file_path.name == "visual.png"]
+                    surface = screenshot("gallery-top")
                     first_partial = window.gallery_child_for_index(
                         gallery_pane, gallery_pane.gallery_capacity, gallery_pane.gallery_capacity)
                     assert first_partial.gallery_row == gallery_pane.gallery_capacity
-                    covered_x, covered_y = first_partial.translate_coordinates(window, 20, 20)
-                    _scroll_x, scroll_y = first_partial.translate_coordinates(
-                        gallery_pane.gallery_scroll, 20, 20)
-                    assert scroll_y > window.gallery_visible_bottom(gallery_pane)
+                    covered_x = int(first_partial.translate_coordinates(window, 20, 20)[0])
+                    sample_y = min(gallery_pane.gallery_scroll.get_height() - 10,
+                                   window.gallery_visible_bottom(gallery_pane) + 5)
+                    covered_y = int(gallery_pane.gallery_scroll.translate_coordinates(
+                        window.get_child(), 0, sample_y)[1])
                     pixel = bytes(surface.get_data())[(covered_y * surface.get_stride() + covered_x * 4):
                                                       (covered_y * surface.get_stride() + covered_x * 4 + 4)]
-                    background = window.palette["background"]
-                    assert pixel[:3] == bytes.fromhex(background[5:7] + background[3:5] + background[1:3]), pixel
+                    backgrounds = [window.palette[key] for key in ("background", "surface")]
+                    assert pixel[:3] in [bytes.fromhex(color[5:7] + color[3:5] + color[1:3])
+                                         for color in backgrounds], pixel
                     assert window.gallery_click(gallery_pane, first_partial,
                         argparse.Namespace(button=1, type=Gdk.EventType.BUTTON_PRESS,
                                            state=Gdk.ModifierType(0), x=20, y=20), first_partial)
                     assert all(item.gallery_row < gallery_pane.gallery_capacity
                                for item in gallery_pane.gallery_flow.get_selected_children())
                     _columns, pitch, _first_y = window.gallery_geometry(
-                        gallery_pane.gallery_flow, gallery_pane.gallery_flow.get_children())
+                        gallery_pane.gallery_flow, widget_children(gallery_pane.gallery_flow))
                     gallery_pane.gallery_scroll.get_vadjustment().set_value(3 * pitch)
                     window.snap_gallery_scroll(gallery_pane)
                     assert window.gallery_top(gallery_pane) == 3
                     for row in range(3, 3 + gallery_pane.gallery_capacity):
-                        visible = [item.gallery_index for item in gallery_pane.gallery_flow.get_children()
+                        visible = [item.gallery_index for item in widget_children(gallery_pane.gallery_flow)
                                    if getattr(item, "gallery_row", -1) == row]
                         assert visible == [row, row + gallery_pane.gallery_capacity], (row, visible)
                     duplicate = window.gallery_child_for_index(
@@ -703,7 +1058,7 @@ def smoke(args):
                     if "First page" not in window.inspector_details.get_text():
                         return True
                     assert window.preview_stack.get_visible_child_name() == "image"
-                    assert window.image.get_pixbuf() is not None
+                    assert window.image.get_paintable() is not None
                     checks.append("PDF first-page preview")
                     screenshot("inspect-pdf")
                     window.set_mode("project")
@@ -867,10 +1222,17 @@ def smoke(args):
                     assert window.stack.get_visible_child_name() == "console"
                     assert "WORKSPACE_COMMAND_OK" in terminal.get_text_format(Vte.Format.TEXT)
                     checks.append("persistent full-window shell output and Ctrl+O panel toggle")
-                    assert not window.terminal_shortcut(terminal,
+                    assert window.key(window,
+                        argparse.Namespace(keyval=Gdk.KEY_p, state=Gdk.ModifierType.CONTROL_MASK))
+                    assert window.mode == "project"
+                    assert window.key(window,
                         argparse.Namespace(keyval=Gdk.KEY_p, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "console"
-                    checks.append("terminal Ctrl+P remains available to shell programs")
+                    assert window.terminal_shortcut(terminal,
+                        argparse.Namespace(keyval=Gdk.KEY_p,
+                                           state=Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK))
+                    terminal.feed_child(b"\x15")
+                    checks.append("idle shell Ctrl+P opens Project; Ctrl+Shift+P sends shell history key")
                     window.set_mode("project")
                     assert window.mode == "project"
                     window.key(window, argparse.Namespace(keyval=Gdk.KEY_Escape, state=0))
@@ -878,6 +1240,17 @@ def smoke(args):
                     window.mode_shortcut("p")
                     assert window.mode == "console"
                     window.set_mode("files")
+                    assert window.mode_shortcut("p") and window.mode == "project"
+                    assert window.mode_shortcut("p") and window.mode == "files"
+                    assert window.get_focus() is window.active.view
+                    window.mode_shortcut("p")
+                    window.mode_shortcut("o")
+                    assert window.mode == "console"
+                    window.mode_shortcut("o")
+                    assert window.mode == "project"
+                    window.mode_shortcut("p")
+                    assert window.mode == "files"
+                    checks.append("Ctrl+P returns to Commander after Project and Ctrl+O shell detours")
                     assert window.command_entry_key(window.command_entry,
                         argparse.Namespace(keyval=Gdk.KEY_i, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "gallery"
@@ -931,17 +1304,16 @@ def smoke(args):
                     step["number"] = 151
                 elif number == 151:
                     pane = window.panes[0]
-                    if pane.gallery_building or not pane.gallery_flow.get_children():
+                    if pane.gallery_building or not widget_children(pane.gallery_flow):
                         return True
                     window.focus_active_browser()
+                    assert window.mode_shortcut("p") and window.mode == "project"
+                    assert window.mode_shortcut("p") and window.mode == "gallery"
+                    checks.append("Ctrl+P returns to Gallery when Project was opened there")
                     focused_card = pane.gallery_flow.get_focus_child()
                     assert focused_card is not None
-                    key_event = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
-                    key_event.window = focused_card.get_window()
-                    key_event.keyval = Gdk.KEY_i
-                    key_event.state = Gdk.ModifierType.CONTROL_MASK
-                    key_event.set_device(Gdk.Display.get_default().get_default_seat().get_keyboard())
-                    Gtk.main_do_event(key_event)
+                    assert window.key(window,
+                        argparse.Namespace(keyval=Gdk.KEY_i, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "files"
                     assert window.get_focus() is pane.view
                     cursor = pane.view.get_cursor()[1]
@@ -959,11 +1331,11 @@ def smoke(args):
                 elif number == 16:
                     pane = window.panes[0]
                     if (pane.path != child / "assets" or pane.gallery_displayed_path != pane.path
-                            or pane.gallery_building or not window.gallery_flow.get_children()
+                            or pane.gallery_building or not widget_children(window.gallery_flow)
                             or window.gallery_layout(pane) != (pane.gallery_columns, pane.gallery_capacity)):
                         return True
                     assert window.mode == "gallery"
-                    parent_card = window.gallery_flow.get_children()[0]
+                    parent_card = widget_children(window.gallery_flow)[0]
                     assert parent_card.is_parent
                     assert window.gallery_flow.get_selected_children() == [parent_card]
                     assert window.gallery_flow.get_focus_child() is parent_card
@@ -980,13 +1352,10 @@ def smoke(args):
                         return True
                     checks.append("gallery folder opens with a visible cursor on parent")
                     checks.append("Commander keeps the parent cursor after Gallery")
-                    key_event = Gdk.Event.new(Gdk.EventType.KEY_PRESS)
-                    key_event.window = parent_card.get_window()
-                    key_event.keyval = Gdk.KEY_x
-                    key_event.state = Gdk.ModifierType(0)
-                    assert parent_card.event(key_event)
+                    assert window.gallery_key(window.gallery_flow,
+                        argparse.Namespace(keyval=Gdk.KEY_x, state=Gdk.ModifierType(0)))
                     assert window.command_entry.get_text() == "x"
-                    assert window.get_focus() is window.command_entry
+                    assert window.get_focus().get_ancestor(Gtk.Entry) is window.command_entry
                     assert window.command_entry_key(window.command_entry,
                         argparse.Namespace(keyval=Gdk.KEY_Escape, state=0))
                     assert window.get_focus() is parent_card
@@ -1024,24 +1393,28 @@ def smoke(args):
                         assert window.gallery_key(window.gallery_flow,
                             argparse.Namespace(keyval=Gdk.KEY_Down, state=0))
                         assert window.gallery_flow.get_focus_child().gallery_index == 1
-                        checks.append("gallery folder navigation refreshes without losing selection state")
-                        checks.append("typed cd navigates from gallery and returns its cursor")
                         _columns, pitch, _first_y = window.gallery_geometry(
-                            pane.gallery_flow, pane.gallery_flow.get_children())
+                            pane.gallery_flow, widget_children(pane.gallery_flow))
+                        if (pane.gallery_scroll.get_vadjustment().get_upper()
+                                - pane.gallery_scroll.get_vadjustment().get_page_size()) < 3 * pitch:
+                            return True
                         pane.gallery_scroll.get_vadjustment().set_value(3 * pitch)
                         window.snap_gallery_scroll(pane)
                         assert window.gallery_top(pane) > 0
+                        checks.append("gallery folder navigation refreshes without losing selection state")
+                        checks.append("typed cd navigates from gallery and returns its cursor")
                         pane.navigate(project)
                         step["gallery_parent_scan_started"] = True
                         return True
                     if (pane.path != project or pane.gallery_displayed_path != project
-                            or pane.gallery_building or not pane.gallery_flow.get_children()):
+                            or pane.gallery_building or not widget_children(pane.gallery_flow)):
                         return True
                     selected_gallery = pane.gallery_flow.get_selected_children()
                     assert len(selected_gallery) == 1
                     assert selected_gallery[0].file_path == child
                     top = window.gallery_top(pane)
-                    assert top <= selected_gallery[0].gallery_row < top + pane.gallery_capacity
+                    if not top <= selected_gallery[0].gallery_row < top + pane.gallery_capacity:
+                        return True
                     assert pane.gallery_flow.get_focus_child() is selected_gallery[0]
                     checks.append("gallery folder changes show the selected card without old scroll offset")
                     window.set_mode("files")
@@ -1051,8 +1424,8 @@ def smoke(args):
 
                     def observe_large_rebuild(*rebuild_args, **rebuild_kwargs):
                         result = original_rebuild(*rebuild_args, **rebuild_kwargs)
-                        if pane.path == bulk and not step.get("bulk_first_seen"):
-                            assert len(pane.entries) > 256
+                        if (pane.path == bulk and len(pane.entries) > 256
+                                and not step.get("bulk_first_seen")):
                             assert pane.cursor_logical() == 0
                             assert len(pane.store) < len(pane.entries)
                             step["bulk_first_seen"] = True
@@ -1069,7 +1442,9 @@ def smoke(args):
                         return True
                     assert step.get("bulk_first_seen")
                     assert len(pane.logical_to_stores) == len(pane.entries)
-                    assert pane.cursor_logical() == len(pane.entries) - 1
+                    assert pane.cursor_logical() == len(pane.entries) - 1, (
+                        pane.cursor_logical(), len(pane.entries), pane.model_pending_target,
+                        pane.visible_top(), pane.capacity, pane.view.get_cursor())
                     assert pane.selected_paths() == [bulk / "program-0899"]
                     checks.append("large folders show a cursor before later rows load")
                     pane.rebuild_entries = step["original_rebuild"]
@@ -1096,28 +1471,30 @@ def smoke(args):
                     from . import app as app_module
                     original_listing = app_module.directory_entries
 
-                    def delayed_listing(folder, hidden=False, on_batch=None, cancelled=None):
+                    def delayed_listing(folder, hidden=False, on_batch=None, cancelled=None,
+                                        include_created=False):
                         if Path(folder) != slow:
-                            return original_listing(folder, hidden, on_batch, cancelled)
+                            return original_listing(folder, hidden, on_batch, cancelled, include_created)
 
                         def delayed_batch(batch):
                             on_batch(batch)
-                            time.sleep(0.2)
+                            slow_continue.wait()
 
-                        return original_listing(folder, hidden, delayed_batch, cancelled)
+                        return original_listing(folder, hidden, delayed_batch, cancelled, include_created)
 
                     app_module.directory_entries = delayed_listing
                     window.panes[0].navigate(slow)
                     step["number"] = 21
                 elif number == 21:
                     pane = window.panes[0]
-                    if pane.path != slow or len(pane.entries) <= 1:
+                    if pane.path != slow or not pane.listed_rows:
                         return True
                     assert "loading" in pane.count.get_text().lower()
                     assert pane.cursor_logical() == 0
                     assert len(pane.entries) < 401
                     checks.append("slow scans expose partial results with a cursor")
                     screenshot("slow-partial")
+                    slow_continue.set()
                     step["number"] = 22
                 elif number == 22:
                     pane = window.panes[0]
@@ -1171,8 +1548,12 @@ def smoke(args):
                         return True
                     assert not window.terminal_shortcut(shell,
                         argparse.Namespace(keyval=Gdk.KEY_o, state=Gdk.ModifierType.CONTROL_MASK))
+                    assert not window.key(window,
+                        argparse.Namespace(keyval=Gdk.KEY_p, state=Gdk.ModifierType.CONTROL_MASK))
+                    assert not window.terminal_shortcut(shell,
+                        argparse.Namespace(keyval=Gdk.KEY_p, state=Gdk.ModifierType.CONTROL_MASK))
                     assert window.mode == "console"
-                    checks.append("Ctrl+O reaches a foreground terminal program")
+                    checks.append("Ctrl+O and Ctrl+P reach foreground terminal programs")
                     step["number"] = 25
                 elif number == 25:
                     shell = window.terminals[0][0]
@@ -1214,11 +1595,12 @@ def smoke(args):
                     window.activate_pane(window.panes[0])
                     window.panes[0].navigate(child)
                     window.set_mode("gallery")
-                    window.resize(1400, 560)
+                    window.set_size_request(1400, 560)
+                    window.set_default_size(1400, 560)
                     step["number"] = 28
                 elif number == 28:
                     pane = window.panes[0]
-                    window.check_resize()
+                    window.queue_resize()
                     if (pane.path != child or len(pane.gallery_children_by_logical) < 70
                             or any(item is None for item in pane.gallery_children_by_logical)
                             or pane.gallery_scroll.get_allocated_height() > 600
@@ -1234,11 +1616,12 @@ def smoke(args):
                     pane.gallery_flow.unselect_all()
                     pane.gallery_flow.select_child(current)
                     current.grab_focus()
-                    window.resize(1400, 940)
+                    window.set_size_request(1400, 940)
+                    window.set_default_size(1400, 940)
                     step["number"] = 29
                 elif number == 29:
                     pane = window.panes[0]
-                    window.check_resize()
+                    window.queue_resize()
                     if (pane.gallery_scroll.get_allocated_height() <= step["small_gallery_height"] + 100
                             or pane.gallery_capacity <= step["small_gallery_capacity"]
                             or pane.gallery_resize_source
@@ -1261,40 +1644,51 @@ def smoke(args):
                     checks.append("Gallery Down follows the resized column to its new bottom")
                     window.set_mode("files")
                     step["old_split_width"] = window.file_panes.get_allocated_width()
-                    window.resize(1600, 940)
+                    window.set_size_request(1600, 940)
+                    window.set_default_size(1600, 940)
                     step["number"] = 30
                 elif number == 30:
-                    window.check_resize()
+                    window.queue_resize()
                     width = window.file_panes.get_allocated_width()
-                    if width < step["old_split_width"] + 100:
+                    if (width < step["old_split_width"] + 100
+                            or window.pane_split_width != width):
                         return True
                     assert abs(window.file_panes.get_position() / width - .5) < .02
                     window.file_panes.set_position(round(width * .65))
-                    assert abs(window.pane_split_ratio - .65) < .02
-                    window.resize(1200, 940)
+                    assert abs(window.pane_split_ratio - .65) < .02, (
+                        window.pane_split_ratio, width, window.file_panes.get_position(),
+                        window.panes[0].get_width(), window.panes[1].get_width())
+                    window.set_size_request(1200, 940)
+                    window.set_default_size(1200, 940)
                     step["number"] = 31
                 elif number == 31:
-                    window.check_resize()
+                    window.queue_resize()
                     width = window.file_panes.get_allocated_width()
                     if width > 1300:
                         return True
                     assert abs(window.file_panes.get_position() / width - .65) < .02
                     checks.append("panes start evenly and retain an intentional split across resize")
                     step["old_file_capacity"] = window.panes[0].capacity
-                    window.resize(1200, 560)
+                    window.set_size_request(1200, 560)
+                    window.set_default_size(1200, 560)
                     step["number"] = 32
                 elif number == 32:
-                    window.check_resize()
+                    window.queue_resize()
                     pane = window.panes[0]
                     if (pane.capacity >= step["old_file_capacity"]
                             or pane.capacity != pane.visible_capacity()
-                            or pane.model_fill_source):
+                            or pane.model_fill_source
+                            or (pane.scroll.get_vadjustment().get_upper()
+                                - pane.scroll.get_vadjustment().get_page_size()
+                                < pane.max_top() * pane.item_pitch() - pane.item_pitch())):
                         return True
                     adjustment = pane.scroll.get_vadjustment()
                     adjustment.set_value(adjustment.get_upper() - adjustment.get_page_size())
                     pane.snap_scroll()
                     top = pane.visible_top()
-                    assert top == pane.max_top()
+                    assert top == pane.max_top(), (
+                        top, pane.max_top(), pane.capacity, pane.item_pitch(),
+                        adjustment.get_upper(), adjustment.get_page_size(), adjustment.get_value())
                     assert pane.store[2 * (top + pane.capacity - 1) + 1][3] == pane.entries[-1][3]
                     checks.append("file columns stay full after a height resize")
                     adjustment = pane.scroll.get_vadjustment()
@@ -1308,6 +1702,39 @@ def smoke(args):
                     step["row_geometry"] = {"top_inset": window.panes[0].top_inset,
                                             "pitch": window.panes[0].row_pitch,
                                             "capacity": window.panes[0].capacity}
+                    pane = window.panes[0]
+                    selected = pane.current_path()
+                    pane.set_sort("size")
+                    assert pane.sort_button.get_label() == "s"
+                    assert pane.current_path() == selected
+                    pane.set_sort("size")
+                    assert pane.sort_button.get_label() == "S"
+                    pane.set_sort("name")
+                    assert pane.sort_button.get_label() == "n"
+                    window.show_workspace_menu()
+                    workspace_menu = window.workspace_button.nightty_popover
+                    assert any("Project" in item.get_label()
+                               for item in workspace_menu.nightty_items)
+                    workspace_menu.popdown()
+                    assert window.key(window, argparse.Namespace(
+                        keyval=Gdk.KEY_F1, state=Gdk.ModifierType.CONTROL_MASK))
+                    menu = pane.locations_button.nightty_popover
+                    assert menu.nightty_category == "location"
+                    step["number"] = 330
+                elif number == 330:
+                    pane = window.panes[0]
+                    menu = pane.locations_button.nightty_popover
+                    assert window.pane_menu_key(pane, menu, pane.locations_button, menu,
+                        argparse.Namespace(keyval=Gdk.KEY_Left, state=0))
+                    step["number"] = 331
+                elif number == 331:
+                    pane = window.panes[0]
+                    menu = pane.view_button.nightty_popover
+                    assert menu.nightty_category == "view"
+                    assert menu.get_parent() is pane.view_button and menu.get_has_arrow()
+                    assert any("Gallery" in item.get_label() for item in menu.nightty_items)
+                    menu.popdown()
+                    checks.append("Ctrl+F1 then Left reaches View; sort reverses and preserves selection")
                     window.terminals[0][0].feed_child(b"exit\n")
                     step["number"] = 34
                 elif number == 34:
@@ -1328,21 +1755,33 @@ def smoke(args):
 
         GLib.timeout_add(150, run)
         app.run([sys.argv[0]])
+        slow_continue.set()
+        if app.window is not None:
+            for job in app.window.jobs:
+                job.cancel.set()
         if app.result == 0:
-            assert step["number"] == 35 and not app.window.terminals
-            checks.append("exiting the final shell quits Nightty")
-            print(json.dumps({"checks": checks,
-                "bin_loaded_seconds": step["bin_loaded_seconds"],
-                "row_geometry": step["row_geometry"],
-                "screenshots": ["/tmp/workspace-" + mode + ".png" for mode in ("terminal-start", "footer-japanese", "files", "files-marked", "files-next-page", "files-end", "files-scrolled", "row-boundary", "search", "quick-view", "gallery-top", "gallery", "gallery-resized", "inspect-image", "inspect-pdf", "project", "console", "agents", "command-output", "bin", "slow-partial")]}), flush=True)
+            if controls_only:
+                assert step["number"] == 52
+                print(json.dumps({"checks": checks,
+                                  "screenshots": ["/tmp/workspace-terminal-start.png",
+                                                  "/tmp/workspace-files-controls.png",
+                                                  "/tmp/workspace-rapid-up-root.png"]}), flush=True)
+            else:
+                assert step["number"] == 35 and not app.window.terminals
+                checks.append("exiting the final shell quits Nightty")
+                print(json.dumps({"checks": checks,
+                    "bin_loaded_seconds": step["bin_loaded_seconds"],
+                    "row_geometry": step["row_geometry"],
+                    "screenshots": ["/tmp/workspace-" + mode + ".png" for mode in ("terminal-start", "footer-japanese", "files", "files-marked", "files-next-page", "files-end", "files-scrolled", "row-boundary", "search", "quick-view", "gallery-top", "gallery", "gallery-resized", "inspect-image", "inspect-pdf", "project", "console", "agents", "command-output", "bin", "slow-partial")]}), flush=True)
         return app.result
 
 
 def main():
     args = parser().parse_args()
     args.left = args.left or args.directory
-    if args.smoke:
-        return smoke(args)
+    if args.smoke or args.smoke_controls:
+        args.smoke = True
+        return smoke(args, controls_only=args.smoke_controls)
     app = Application(args)
     return app.run(sys.argv)
 

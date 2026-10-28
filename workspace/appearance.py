@@ -14,7 +14,8 @@ PALETTE_KEYS = {
     "image", "video", "audio", "document", "source", "data", "archive",
     "symlink", "executable",
 }
-OPTIONAL_PALETTE_KEYS = {"terminal_foreground", "terminal_background", "marked"}
+OPTIONAL_PALETTE_KEYS = {"terminal_foreground", "terminal_background", "marked",
+                         "dialog_background"}
 FONT_SIZES = {"ui_px", "files_px", "small_px", "heading_px"}
 HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 FONT_FAMILY = re.compile(r"[a-zA-Z0-9 _-]{1,64}\Z")
@@ -29,20 +30,47 @@ headerbar button.top-tab { padding:5px 11px; border-bottom:2px solid transparent
 headerbar button.top-tab-active { background:$surface; color:$foreground; border-bottom-color:$accent; }
 headerbar button.tab-close { color:$muted; padding:5px 5px; }
 headerbar button.tab-close:hover { color:$header_text; }
+headerbar button.transfer-alert { background:#a83f32; color:#ffffff; font-weight:700; }
 button { border-radius:2px; padding:4px 8px; }
 button:checked { background:$accent; color:$accent_text; }
-dialog.mc-dialog { background:$surface; color:$foreground; border:2px solid $accent; border-radius:0; box-shadow:none; font-family:'$family'; font-size:${ui_px}px; }
-.mc-dialog-title { background:$surface; color:$accent; border-bottom:1px solid $border; padding:5px 14px; font-size:${small_px}px; font-weight:700; }
-.mc-dialog-message { color:$foreground; padding:18px 20px 8px; }
-.mc-dialog-detail { color:$muted; font-size:${small_px}px; padding:0 20px 10px; }
-dialog.mc-dialog button.mc-dialog-button { background:$background; background-image:none; color:$foreground; border:1px solid $border; border-radius:0; box-shadow:none; min-width:84px; padding:4px 12px; font-family:'$family'; font-size:${ui_px}px; }
-dialog.mc-dialog button.mc-dialog-default, dialog.mc-dialog button.mc-dialog-button:focus { background:$accent; color:$accent_text; border-color:$accent; }
-dialog.mc-dialog button.mc-dialog-button:hover { border-color:$foreground; }
+button.pane-header-control { background:transparent; background-image:none; color:$muted; border:0; box-shadow:none; border-radius:4px; min-width:32px; min-height:32px; padding:3px; }
+button.pane-header-control:hover,
+button.pane-header-control:focus { background:$surface; color:$foreground; }
+button.pane-address-control { min-width:28px; min-height:28px; margin:2px; }
+entry.pane-address-entry { padding-left:36px; padding-right:36px; border-radius:4px; }
+.pane-menu-item { min-width:260px; padding:6px 12px; }
+window.mc-dialog { background:$dialog_background; color:$foreground; border:3px solid $accent; border-radius:0; box-shadow:none; font-family:'$family'; }
+.mc-dialog-content { background:$dialog_background; }
+.mc-dialog-title { background:$accent; color:$accent_text; border-bottom:2px solid $border; padding:12px 26px; font-size:${dialog_title_px}px; font-weight:700; }
+.mc-dialog-message { color:$foreground; padding:24px 26px 12px; font-size:${dialog_message_px}px; }
+.mc-dialog-detail { color:$muted; padding:0 26px 20px; font-size:${dialog_detail_px}px; }
+.mc-dialog-actions { padding:14px 26px 24px; border-top:1px solid $accent; }
+.mc-conflict-actions { padding:0 26px 12px; }
+.mc-conflict-actions:last-child { padding-bottom:24px; }
+window.mc-dialog button.mc-dialog-button { background:$surface; background-image:none; color:$foreground; border:2px solid $border; border-radius:2px; box-shadow:none; min-width:150px; min-height:52px; padding:8px 16px; font-family:'$family'; font-size:${dialog_button_px}px; font-weight:700; }
+window.mc-dialog button.mc-dialog-button:hover { border-color:$foreground; }
+window.mc-dialog button.mc-dialog-button.mc-dialog-focused,
+window.mc-dialog button.mc-dialog-button:focus { background:$accent; color:$accent_text; border-color:$accent_text; }
+window.mc-dialog.mc-danger-dialog { border-color:#d94e44; }
+window.mc-danger-dialog .mc-dialog-title { background:#a83f32; color:#ffffff; border-bottom-color:#d94e44; }
+window.mc-danger-dialog .mc-dialog-message { color:#ffbbb3; }
+window.mc-danger-dialog button.mc-danger-default { color:#ffbbb3; border-color:#e36b58; }
+window.mc-danger-dialog button.mc-danger-default.mc-dialog-focused,
+window.mc-danger-dialog button.mc-danger-default:focus { background:#a83f32; color:#ffffff; border-color:#ffc2bb; }
+.mc-transfer-fields { padding:20px 26px 12px; }
+.mc-transfer-caption { color:$foreground; font-size:${dialog_detail_px}px; font-weight:700; }
+.mc-transfer-value { color:$foreground; font-size:${dialog_message_px}px; padding-bottom:12px; }
+entry.mc-transfer-entry { min-height:40px; font-size:${dialog_message_px}px; padding:4px 8px; }
+dropdown.mc-find-scope { min-height:42px; font-size:${dialog_message_px}px; }
+.mc-transfer-error { color:#e36b58; font-size:${dialog_detail_px}px; padding:0 26px 16px; }
+.mc-transfer-progress { margin:4px 26px 20px; min-height:12px; }
+.search-results-bar { background:$surface; border-bottom:1px solid $border; }
+.search-results-label { color:$accent; font-size:${small_px}px; font-weight:700; }
 entry { background:$surface; color:$foreground; border:1px solid $border; border-radius:0; font-family:'$family'; font-size:${files_px}px; }
 treeview { background:$background; color:$foreground; font-family:'$family'; font-size:${files_px}px; outline-width:0; }
 treeview:selected { background:$accent; color:$accent_text; outline-width:0; }
 .pane-inactive treeview:selected { background:$surface; color:$subtle; outline-width:0; }
-iconview { background:$background; color:$foreground; font-family:'$family'; font-size:${files_px}px; font-weight:${files_weight}; outline-width:0; }
+iconview { background:$background; color:$foreground; font-family:'$family'; font-size:${file_text_px}px; font-weight:${files_weight}; outline-width:0; }
 iconview:selected { background:$accent; color:$accent_text; outline-width:0; }
 .pane-inactive iconview:selected { background:$surface; color:$subtle; outline-width:0; }
 treeview header button { background:$surface; color:$muted; border:0; border-radius:0; font-size:${small_px}px; }
@@ -62,6 +90,7 @@ textview, textview text { background:$surface; color:$foreground; font-size:${ui
 entry.command-entry { background:transparent; border:0; box-shadow:none; padding:2px; }
 .pane-active { border-top:2px solid $accent; }
 .pane-inactive { border-top:2px solid $surface; }
+.file-split > separator { min-width:6px; background-image:linear-gradient(to right, $border 0%, $border 33%, $background 33%, $background 67%, $border 67%, $border 100%); }
 .inspector-details { background:$surface; border-left:1px solid $border; padding:18px; }
 .gallery-tile { background:$surface; border:1px solid $border; border-radius:3px; padding:8px; }
 flowboxchild { border:2px solid transparent; }
@@ -102,4 +131,15 @@ def load_appearance(path=None):
 
 
 def stylesheet(appearance):
-    return CSS.substitute({"marked": "#b58900"} | appearance["palette"] | appearance["fonts"]).encode()
+    fonts = appearance["fonts"]
+    # At the default 26px, GTK loses one scanline from capital top strokes.
+    # A quarter pixel restores it without increasing the file row's height.
+    file_text_px = fonts["files_px"] + 0.25
+    dialog_sizes = {"dialog_title_px": max(fonts["heading_px"], fonts["ui_px"] + 6),
+                    "dialog_message_px": fonts["ui_px"] + 4,
+                    "dialog_detail_px": fonts["ui_px"] + 2,
+                    "dialog_button_px": fonts["ui_px"] + 4}
+    palette = {"marked": "#b58900",
+               "dialog_background": appearance["palette"].get("dialog_background", appearance["palette"]["background"])}
+    return CSS.substitute(palette | appearance["palette"] | fonts | dialog_sizes |
+                          {"file_text_px": file_text_px}).encode()

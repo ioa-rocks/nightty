@@ -1,9 +1,9 @@
 # Nightty — native Surface prototype
 
-A keyboard-first graphical workspace for people who live in Midnight Commander
-and command-line tools. This is a new independent Surface component, with the
-Aethera workspace vision as orientation and Second Brain as an optional agent
-backend. The existing browser AgentConsole remains independent.
+A keyboard-first terminal workspace with a commander inside it, plus Gallery,
+project context and optional agents. This is a new independent Surface component,
+with the Aethera workspace vision as orientation and Second Brain as an
+optional agent backend. The existing browser AgentConsole remains independent.
 
 ## First slice
 
@@ -29,24 +29,30 @@ backend. The existing browser AgentConsole remains independent.
   A double line
   separates panes and a single line separates filename columns. Clicking blank
   pane space focuses
-  the nearest entry. Each pane's
-  small locations menu contains favourites and recent folders. Ctrl+5 turns
-  the right pane into a large preview of the selected file on the left; the
+  the nearest entry. Each pane header starts with a flat one-letter sort control
+  and a monochrome list/gallery control. A location star and Find magnifier sit
+  inside the editable path field. Lowercase sort letters mean ascending, uppercase descending:
+  n/N for name, e/E for extension, s/S for size, m/M for modified time, and c/C
+  for available creation time. Locations include Home, the filesystem root, mounts
+  that expose a local path, favourites and recent folders.
+  Ctrl+5 turns
+  the right pane into a large preview of the selected item on the left; the
   right folder remains the copy destination. A fixed slot before each name shows
   `/` for directories, `@` for symbolic links, `*` for executables, or a space.
   Going to a parent selects the
   directory just left. Large folders render their first screen before later rows;
   slow directory scans show partial results while the rest arrive.
-  Quick navigation and explicit background copying remain available without
-  replacing existing destinations.
+  Quick navigation, filename search and file operations remain available with
+  explicit choices when destination files already exist.
 - Ctrl+I switches the active pane between Files and Gallery; the other pane
   keeps its own view. Tab changes the active pane without changing either view.
   Compact horizontal cards fill the left column before the right and show a
   thumbnail, text excerpt or file type
   icon, plus filename, type, size and image dimensions or modification time. The
   parent directory appears as a large `..` instead of a folder card. Select
-  several items and use F5 to copy them to the other pane. F3 expands one file
-  with type, size, modified time, permissions, location and image dimensions; Escape
+  several items and use F5 to copy or F6 to move them to the other pane. F3 expands a selected
+  file or folder with type, size, modified and available creation time,
+  permissions, owner, location and filesystem space; Escape
   returns from that single-file preview to the gallery or file list. Left and
   Right follow the same sliding columns and screenfuls as the file list. Gallery
   scrolling lands on complete card rows, and the pane hides any partial row below
@@ -77,12 +83,17 @@ enforced by Second Brain. Metadata cannot supply executable commands or credenti
 
 ## Run
 
-Uses the system Python and installed PyGObject, GTK 3, VTE 2.91 and GdkPixbuf.
-The installed VTE binding targets GTK 3; no Python environment or dependency
-download is required on the development host. BIV uses GTK 4; its viewing logic
-and service interfaces are future reuse candidates, not embedded by this slice.
+Uses the system Python and installed PyGObject, GTK 4, VTE 3.91 and GdkPixbuf.
+The VTE 3.91 introspection namespace is the GTK 4 binding. No Python environment
+or dependency download is required on the development host. BIV also uses GTK 4;
+its viewing logic and service interfaces are future reuse candidates, not
+embedded by this slice.
 PDF previews use `pdftocairo` when it is installed; other file views continue
 to work without it.
+
+The Files pane still uses `Gtk.IconView`, and agent selectors use
+`Gtk.ComboBoxText`. GTK 4 supports these widgets but deprecated them in 4.10;
+replacing them is follow-up work for GTK 5 readiness.
 
 ```sh
 ./run.sh --left /path/to/work --right /path/to/another/folder
@@ -93,7 +104,9 @@ to work without it.
 `python3 -m workspace` launches at the default size unless given that option.
 
 Colors, font sizes and file name weight live in [appearance.json](appearance.json).
-The terminal shares the file list's family, pixel size and weight. The default
+The terminal uses the configured font family, pixel size and weight. The file
+list uses the same font with a quarter-pixel raster adjustment that preserves
+capital strokes without increasing row height. The default
 font is DejaVu Sans Mono at 26 pixels, regular weight, close to the font resolved
 from the operator's Kitty `monospace` setting at 20 points on a 96 DPI display.
 The palette matches the operator's MC skin through Kitty's Solarized colors:
@@ -149,27 +162,64 @@ Project mode enhances the same files rather than replacing navigation with a
 separate data store. Full task/pocket permissions and inheritance remain future
 Second Brain work.
 
-## Copying
+## File operations
 
 In Files, Insert or Ctrl+T marks a file and advances the cursor; Shift+Up/Down
 marks the current file and moves in that direction. Right-click toggles a mark
 without moving. A line closes each file list. Each pane's two-row footer shows one
 selected file's details or the selected count and size, then that pane's folder,
 entry count and available filesystem space. The command line below uses a
-`user@host:path$` prompt. F5
-copies marked entries, or the current entry when nothing is marked. Gallery
-uses its own selection. Copies run in a background worker. They
-preserve symbolic links and refuse existing destinations. Each regular file is
-written to a temporary sibling and published without overwriting another name.
+`user@host:path$` prompt. F5 copies marked entries, or the current entry when
+nothing is marked; F6 moves them. Gallery uses its own selection. Both dialogs
+show the source and an editable destination, with Yes, Background and Cancel.
+Yes shows progress with Switch to Background and Cancel, then closes on success.
+Shift+F5 suggests the
+current file's own path and focuses its selected filename for a copy in the same folder;
+Shift+F6 does the same for rename. Transfers run in a worker. They preserve
+symbolic links and merge existing destination directories. For existing files,
+the overwrite dialog shows both sizes and dates and offers Yes, No, All, None,
+If older, If smaller, Size differs and Abort. Background conflicts alert on the
+Transfers button until resolved. Each regular file is
+written to a temporary sibling and published atomically, replacing an existing
+destination only after an overwrite choice allows it.
 Directory transfers can leave already completed entries on cancellation/failure;
-the transfer panel reports that state. Cancellation is cooperative. Transfer
-progress is desktop operation state, separate from project tasks. No delete or
-move operation is provided in this first prototype; MC is available in a terminal.
+directory moves leave skipped source entries in place. The transfer panel reports
+skipped counts. Same-filesystem moves use an atomic rename;
+cross-filesystem moves copy first, then remove the source. Cancellation is
+cooperative. Background failures ring the desktop bell and leave an alert on the
+transfer button until the transfer panel is opened. Transfer progress is desktop
+operation state, separate from project tasks.
+
+F7 creates a new directory in the active pane and selects it after refresh.
+F8 permanently deletes marked entries, or the current entry when nothing is
+marked. Its red confirmation states that selected directories are removed
+recursively. Deletion starts without scanning the tree for totals; the progress
+dialog counts items as they are removed and offers Abort. Symbolic links are
+removed without following them. Aborting or encountering an error can leave a
+directory partially deleted, and the operation panel records the result.
+
+## Finding files
+
+Alt+F7 or Ctrl+Shift+F opens Find Files; the magnifier inside each pane's path
+does the same. **Current tree (live)** walks the active folder and finds new files
+immediately without following directory symlinks. **All indexed files
+(plocate)** searches the system index by filename; its freshness depends on
+`updatedb`. Results stream into the active file pane and stop at 5,000 matches,
+with a limit notice when a query needs narrowing. Hidden entries are included
+in the live search when the pane's hidden-file setting is enabled.
+
+The result pane keeps the usual keyboard navigation and marks. F3 previews a
+result, F4 opens it in its default application, and F5/F6/F8 act on selected or
+marked result paths. Enter opens a selected directory. Refresh runs the same
+search again; Escape or Close returns to the original folder. This search finds
+**filenames**; searching file contents and an embedded F4 editor are later work.
 
 ## Controls
 
 - Ctrl+PageUp / Ctrl+PageDown: move between workspace tabs; Ctrl+Shift+T: new
   shell tab. All tabs have the same shell controls.
+- The current Shell, Commander or Project mode appears as a dropdown in the top
+  bar; each pane header exposes Sort and View, with locations and Find inside the path.
 - Ctrl+O: switch the current tab between its shell and previous view at the
   shell prompt. During a foreground program, it goes to that program instead;
   Ctrl+Shift+O always sends a literal Ctrl+O to the terminal.
@@ -180,44 +230,55 @@ move operation is provided in this first prototype; MC is available in a termina
   sends Ctrl+V to a foreground program when the clipboard contains an image.
   Image attachment depends on that program's clipboard support and access to
   the local clipboard. Ctrl+click opens terminal links and simple file paths.
-- In native views, Ctrl+P opens Project (press again for Shell); Ctrl+I
-  switches Gallery and Files. Terminal programs keep their own Ctrl+P and Ctrl+I.
+- Ctrl+P opens Project from Files, Gallery, or an idle shell; pressing it again
+  returns to that view. Foreground terminal programs receive Ctrl+P, and
+  Ctrl+Shift+P sends a literal Ctrl+P to the idle shell for command history.
+  Ctrl+O switches to Shell; Ctrl+I switches Gallery and Files in native views.
 - Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 select Files / Project / Shell / Gallery
   from native views or an idle shell. Foreground terminal programs receive
   their own keys.
-- Escape closes an expanded single-file preview or inline search; it leaves
+- Escape closes an expanded single-file preview, inline search, or find results; it leaves
   Gallery, Files and Project open. F12 hides the window.
 - Type in a Files or Gallery pane to use the command line; Enter runs the command
   and opens its output, while `cd`, `cd ..`, `cd -`, and `cd /path` change the
   active pane. Backspace removes the last command character while focus is on a
   browser pane.
   Up / Down in the command line recall commands; Escape returns to the pane.
-- Ctrl+5: toggle a large quick view in the right pane while browsing the left
-- Alt+1 / Alt+2: locations menu for the left / right pane (favourites and
-  recent folders); Alt+F1 / Alt+F2 also work if the desktop passes them through
-  (GNOME normally reserves Alt+F2 for Run Command)
-- Alt+S or the small magnifier beside a path: inline filename search in the
-  active pane; Escape closes it. The GTK floating type-ahead box is disabled.
+- Ctrl+5: toggle a large quick view in the right pane while browsing the left;
+  View > Preview and info expands its details
+- Ctrl+F1 / Ctrl+F2: open Places for the left / right pane. Inside a pane menu,
+  Left and Right switch Sort, View, and Locations/Favourites in header order;
+  Up and Down move through choices;
+  Enter chooses one and Escape returns to the file list. Long menus scroll to
+  keep the focused choice visible. Each popup points to its header control.
+- Alt+1 / Alt+2 also open Places for the left / right pane. Alt+F1 / Alt+F2
+  work when the desktop passes them through (GNOME normally reserves both).
+- Alt+S: quick goto by filename in the active pane; Escape closes it. The GTK
+  floating type-ahead box is disabled.
+- Alt+F7 / Ctrl+Shift+F or the pane magnifier: search the current tree live or
+  search indexed filenames everywhere through plocate
 - Tab / Shift+Tab: switch browser panes and keep keyboard focus in the selected
   pane; Enter: enter a directory or open a file with GNOME's
   default application; F3: embedded preview; Home / End: first / last item
 - Insert / Ctrl+T: mark or unmark the cursor file and move down;
   Shift+Up / Shift+Down: mark or unmark and move that way; right-click: toggle
-  a mark without moving. F5 copies marked files, or the cursor file.
+  a mark without moving. F5 copies and F6 moves marked files, or the cursor file.
 - Alt+Up: parent; Ctrl+L: edit the active path; Ctrl+H: hidden files
 - Ctrl+D: star or unstar the active directory
-- Locations menu beside either path: choose a favourite or recent folder, or
-  star/unstar that pane's current folder
-- F3: inspect selected file; F4: open with the default application; F5:
-  background copy in Files or Gallery (the confirmation defaults to Yes)
-- ⇄ in the top bar: transfer progress and cancellation
+- The star inside either path: choose Home, a usable mount, favourite or recent
+  folder, or type a path. Its menu toggles the current folder's favourite status.
+- F3: inspect a selected file or folder; F4: open with the default application;
+  Shift+F5: copy with a same-folder filename; Shift+F6: rename in place;
+  F7: create a directory in the active pane; F8: delete selected or marked items
+- ⇄ in the top bar: file operation progress and cancellation
 - Escape: leave Inspect or inline search; F12: hide; Ctrl+Q: explicit quit
 
 ## Verification
 
 `python3 -m unittest discover -s tests -v` verifies metadata inheritance,
-navigation state, copy cancellation/no-clobber, symlink preservation and the
-loopback-only agent client. `./run.sh --smoke --state /tmp/workspace-smoke-state`
+navigation state, copy and move cancellation/no-clobber, deletion abort and
+symlink handling, live and indexed filename search, and the loopback-only agent client.
+`./run.sh --smoke --state /tmp/workspace-smoke-state`
 uses disposable files and fake agents, exercises native navigation, preview,
 copying and terminal output, and saves screenshots under `/tmp/`.
 
