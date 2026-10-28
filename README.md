@@ -273,12 +273,42 @@ search again; Escape or Close returns to the original folder. This search finds
 - ⇄ in the top bar: file operation progress and cancellation
 - Escape: leave Inspect or inline search; F12: hide; Ctrl+Q: explicit quit
 
+## Code layout
+
+`workspace/` is the package; `python3 -m workspace` runs `cli.py`.
+
+- `cli.py` — argument parser, the single-instance `Gtk.Application` and `main()`.
+- `app.py` — the `Window`: mode switching between Shell, Commander, Gallery,
+  Project and the inspector, key routing, the MC-style command line, the
+  project context view, pane menus, quick view and the find dialog.
+- `pane.py` — `Pane`, one directory pane: two-column file list, sort and
+  location controls, filename search results, marks and cursor logic.
+- `gallery.py` — `Gallery`, the card view each pane owns: sliding columns,
+  selection sync with the file list, keyboard navigation and lazy thumbnails.
+- `shells.py` — `ShellTabs`: the terminal records, notebook and header tab
+  buttons, per-tab browser state, spawning, closing and terminal shortcuts.
+- `transfers.py` — `FileOperations`: copy, move, delete and create-directory
+  dialogs, background jobs, conflicts and the ⇄ header button.
+- `agent_panel.py` — `AgentPanel`, the Agents tab; `agents.py` is the
+  loopback HTTP client it talks to.
+- `model.py` — file-system work without GTK: directory listing, metadata and
+  project context, transfer and deletion jobs, persisted state.
+- `search.py` — live and plocate filename search.
+- `previews.py` — size formatting, PDF rendering and inspector content.
+- `widgets.py` — small GTK 4 helpers: the packing-order `Box`, event
+  controller adapters, dialog builders.
+- `appearance.py` — `appearance.json` loading and the stylesheet.
+
+`tests/` holds the unittest suites for the GTK-free modules and `tests/smoke/`,
+the native scenario described under Verification.
+
 ## Verification
 
 `python3 -m unittest discover -s tests -v` verifies metadata inheritance,
 navigation state, copy and move cancellation/no-clobber, deletion abort and
 symlink handling, live and indexed filename search, and the loopback-only agent client.
-`./run.sh --smoke --state /tmp/workspace-smoke-state`
+`python3 -m tests.smoke --state /tmp/workspace-smoke-state`, run from the
+repository root,
 uses disposable files and fake agents, exercises native navigation, preview,
 copying and terminal output, and saves screenshots under `/tmp/`.
 
