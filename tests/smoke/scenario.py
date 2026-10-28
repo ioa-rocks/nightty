@@ -981,26 +981,26 @@ def run_smoke(args, controls_only=False):
                     window.project_tabs.set_current_page(2)
                     step["number"] = 7
                 elif number == 7:
-                    if window.profile_picker.get_active_id() != "fixture":
+                    if window.agent_panel.profile_picker.get_active_id() != "fixture":
                         return True
                     assert not fake.calls
-                    window.compose.get_buffer().set_text("Inspect this fixture")
-                    window.send_agent()
+                    window.agent_panel.compose.get_buffer().set_text("Inspect this fixture")
+                    window.agent_panel.send()
                     step["number"] = 8
                 elif number == 8:
-                    if window.agent_sending:
+                    if window.agent_panel.sending:
                         return True
                     # Refresh can replace the composer buffer; the retry must
                     # still keep its previously created session and request ID.
-                    window.refresh_agents()
+                    window.agent_panel.refresh()
                     step["number"] = 9
                 elif number == 9:
-                    if window.agent_loading or window.profile_picker.get_active_id() != "fixture":
+                    if window.agent_panel.loading or window.agent_panel.profile_picker.get_active_id() != "fixture":
                         return True
-                    window.send_agent()
+                    window.agent_panel.send()
                     step["number"] = 10
                 elif number == 10:
-                    text = window.chat.get_buffer().get_text(window.chat.get_buffer().get_start_iter(), window.chat.get_buffer().get_end_iter(), False)
+                    text = window.agent_panel.chat.get_buffer().get_text(window.agent_panel.chat.get_buffer().get_start_iter(), window.agent_panel.chat.get_buffer().get_end_iter(), False)
                     if "Fixture response" not in text:
                         return True
                     assert "<b>kept as text</b>" in text

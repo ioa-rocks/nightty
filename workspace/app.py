@@ -15,7 +15,6 @@ import socket
 import stat
 import threading
 from urllib.parse import urlsplit
-import uuid
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -23,6 +22,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Vte", "3.91")
 from gi.repository import Gdk, Gio, GLib, Gtk, Pango, Vte
 
+from .agent_panel import AgentPanel
 from .agents import Agents
 from .appearance import load_appearance, stylesheet
 from .model import Deletion, Transfer, context_for, directory_entries, sort_directory_rows
@@ -1258,11 +1258,7 @@ class Window(Gtk.ApplicationWindow):
         self.selection, self.mode = None, "files"
         self.quick_enabled, self.quick_serial = False, 0
         self.inspector_target, self.inspector_return_mode = None, "files"
-        self.agent_client = client or Agents(args.backend)
-        self.agent_snapshot, self.agent_session = {}, None
-        self.agent_loading, self.agent_sending, self.agent_request_key = False, False, None
-        self.agent_drafts = {}
-        self.pending_agent_sends = {}
+        self.agent_panel = AgentPanel(self, client or Agents(args.backend))
         self.command_history = []
         self.command_history_index = None
         self.command_saved_input = ""
@@ -1346,9 +1342,8 @@ class Window(Gtk.ApplicationWindow):
         self.project_tabs.append_page(scrolled(self.overview), Gtk.Label(label="Context"))
         self.work_box = Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=20)
         self.project_tabs.append_page(scrolled(self.work_box), Gtk.Label(label="Work"))
-        self.agents_box = self.build_agents()
-        self.project_tabs.append_page(self.agents_box, Gtk.Label(label="Agents"))
-        self.project_tabs.connect("switch-page", lambda _n, _p, number: self.refresh_agents() if number == 2 else None)
+        self.project_tabs.append_page(self.agent_panel.widget, Gtk.Label(label="Agents"))
+        self.project_tabs.connect("switch-page", lambda _n, _p, number: self.agent_panel.refresh() if number == 2 else None)
         self.stack.add_named(project, "project")
 
         inspector = Box(orientation=Gtk.Orientation.VERTICAL)
@@ -3650,159 +3645,6 @@ class Window(Gtk.ApplicationWindow):
         except GLib.Error as error:
             self.failure(error)
         return True
-
-    def build_agents(self):
-        box = Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin=15)
-        controls = Box(spacing=8)
-        self.profile_picker = Gtk.ComboBoxText()
-        self.session_picker = Gtk.ComboBoxText()
-        controls.pack_start(self.profile_picker, False, False, 0)
-        controls.pack_start(self.session_picker, True, True, 0)
-        controls.pack_start(button("Refresh", self.refresh_agents), False, False, 0)
-        controls.pack_start(button("New", self.new_agent_session), False, False, 0)
-        self.profile_picker.connect("changed", lambda *_: self.profile_changed())
-        self.session_picker.connect("changed", lambda *_: self.load_agent_session())
-        box.pack_start(controls, False, False, 0)
-        self.agent_info = label("Connect to the existing local agent service. Folder contents are shared only when you send them.", "muted")
-        box.pack_start(self.agent_info, False, False, 0)
-        self.chat = textview()
-        box.pack_start(scrolled(self.chat), True, True, 0)
-        self.compose = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR)
-        self.compose.set_left_margin(12)
-        self.compose.set_top_margin(10)
-        composer = scrolled(self.compose)
-        composer.set_size_request(-1, 100)
-        box.pack_start(composer, False, False, 0)
-        self.compose.get_buffer().connect("changed", self.draft_changed)
-        self.send_button = button("Send to selected agent", self.send_agent)
-        self.send_button.set_sensitive(False)
-        box.pack_start(self.send_button, False, False, 0)
-        return box
-
-    def draft_changed(self, *_):
-        profile = self.profile_picker.get_active_id()
-        if profile:
-            buffer = self.compose.get_buffer()
-            self.agent_drafts[profile] = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False)
-            self.agent_request_key = None
-
-    def refresh_agents(self):
-        if self.agent_loading:
-            return
-        self.agent_loading = True
-        self.agent_info.set_text("Connecting…")
-
-        def ready(snapshot):
-            self.agent_loading = False
-            selected = self.profile_picker.get_active_id() or (self.context or {}).get("agent")
-            self.agent_snapshot = snapshot
-            self.profile_picker.remove_all()
-            for profile in snapshot.get("profiles", []):
-                self.profile_picker.append(profile["id"], profile["name"])
-            if selected:
-                self.profile_picker.set_active_id(selected)
-            if self.profile_picker.get_active() < 0:
-                self.profile_picker.set_active(0)
-            self.profile_changed()
-
-        def failed(exc):
-            self.agent_loading = False
-            self.agent_info.set_text("Agent service unavailable. Files and terminals remain available.")
-            self.send_button.set_sensitive(False)
-        self.async_call(self.agent_client.snapshot, ready, failed)
-
-    def profile_changed(self):
-        identifier = self.profile_picker.get_active_id()
-        if not identifier:
-            return
-        self.agent_session = None
-        self.session_picker.remove_all()
-        for session in self.agent_snapshot.get("sessions", []):
-            if session["profile"] == identifier:
-                self.session_picker.append(session["id"], session["title"])
-        self.session_picker.set_active(0)
-        profile = next(p for p in self.agent_snapshot["profiles"] if p["id"] == identifier)
-        self.agent_info.set_text(f"{profile['name']} · {profile.get('session_mode', '')} · {profile.get('execution', '')} · " + (profile.get("collection") or "No Library access"))
-        draft = self.agent_drafts.get(identifier, "")
-        self.compose.get_buffer().set_text(draft)
-        self.send_button.set_sensitive(not self.agent_sending)
-
-    def new_agent_session(self):
-        identifier = self.profile_picker.get_active_id()
-        if not identifier or self.agent_sending:
-            return
-        self.agent_session = None
-        self.pending_agent_sends.pop(identifier, None)
-        self.session_picker.set_active(-1)
-        self.chat.get_buffer().set_text("A new conversation starts when you send your first message.")
-
-    def load_agent_session(self):
-        profile, session = self.profile_picker.get_active_id(), self.session_picker.get_active_id()
-        self.agent_session = session
-        if not profile or not session:
-            self.chat.get_buffer().set_text("Choose a conversation, or send a message to start one.")
-            return
-
-        def ready(result):
-            if profile != self.profile_picker.get_active_id() or session != self.agent_session:
-                return
-            transcript = "\n\n".join(m["role"].upper() + "\n" + m["content"] for m in result.get("messages", []))
-            self.chat.get_buffer().set_text(transcript or "No messages yet.")
-            if result.get("status") == "running":
-                GLib.timeout_add(2000, lambda: (self.load_agent_session(), False)[1] if session == self.agent_session else False)
-        self.async_call(lambda: self.agent_client.detail(profile, session), ready)
-
-    def send_agent(self):
-        profile = self.profile_picker.get_active_id()
-        buffer = self.compose.get_buffer()
-        text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), False).strip()
-        if not profile or not text or self.agent_sending:
-            return
-        mode = next(p.get("session_mode") for p in self.agent_snapshot["profiles"] if p["id"] == profile)
-        session = None if mode == "one_off" else self.agent_session
-        pending = self.pending_agent_sends.get(profile)
-        if not pending or pending["text"] != text:
-            pending = {"profile": profile, "key": uuid.uuid4().hex, "text": text, "session": session}
-            self.pending_agent_sends[profile] = pending
-        request_key = pending["key"]
-        self.agent_sending = True
-        self.send_button.set_sensitive(False)
-        self.profile_picker.set_sensitive(False)
-        self.session_picker.set_sensitive(False)
-
-        def submit():
-            if pending["session"] is None:
-                pending["session"] = self.agent_client.create(profile)["id"]
-            target = pending["session"]
-            return self.agent_client.send(profile, target, request_key, text)
-
-        def ready(result):
-            self.agent_sending = False
-            self.agent_session = result["id"]
-            current = self.compose.get_buffer()
-            current_text = current.get_text(current.get_start_iter(), current.get_end_iter(), False).strip()
-            if current_text == text:
-                current.set_text("")
-            self.agent_request_key = None
-            self.pending_agent_sends.pop(profile, None)
-            self.send_button.set_sensitive(True)
-            self.profile_picker.set_sensitive(True)
-            self.session_picker.set_sensitive(True)
-            self.load_agent_session_direct(profile, result["id"])
-
-        def failed(exc):
-            self.agent_sending = False
-            self.send_button.set_sensitive(True)
-            self.profile_picker.set_sensitive(True)
-            self.session_picker.set_sensitive(True)
-            self.agent_info.set_text(str(exc) + ". Your draft is retained.")
-        self.async_call(submit, ready, failed)
-
-    def load_agent_session_direct(self, profile, session):
-        if profile != self.profile_picker.get_active_id():
-            return
-        self.session_picker.append(session, "Current conversation")
-        self.session_picker.set_active_id(session)
 
     def hide_window(self, *_):
         self.hide()
