@@ -177,7 +177,36 @@ def run_smoke(args, controls_only=False, capture_only=False):
                 if capture_only and step["number"] == 54:
                     if screenshot("command-focused") is None:
                         return True
+                    left = window.panes[0]
+                    window.activate_pane(left)
+                    left.view.grab_focus()
+                    assert not window.command_history
+                    assert window.command_key(argparse.Namespace(keyval=Gdk.KEY_x, state=0))
+                    assert window.command_entry_key(window.command_entry,
+                        argparse.Namespace(keyval=Gdk.KEY_Up, state=0))
+                    assert window.command_entry.has_css_class("command-no-action")
                     step["number"] = 55
+                    return True
+                if capture_only and step["number"] == 55:
+                    if screenshot("command-no-action") is None:
+                        return True
+                    window.command_entry_key_released(None, Gdk.KEY_Up, 0, Gdk.ModifierType(0))
+                    step["number"] = 56
+                    return True
+                if capture_only and step["number"] == 56:
+                    if window.command_entry.has_css_class("command-no-action"):
+                        return True
+                    left = window.panes[0]
+                    for keyval in (Gdk.KEY_KP_Up, Gdk.KEY_Down, Gdk.KEY_KP_Down):
+                        assert window.command_entry_key(window.command_entry,
+                            argparse.Namespace(keyval=keyval, state=0))
+                        assert window.command_entry.has_css_class("command-no-action")
+                        window.clear_command_no_action()
+                    focus = window.get_focus()
+                    assert (window.active is left and window.command_entry.get_text() == "x"
+                            and (focus is window.command_entry
+                                 or focus.get_ancestor(Gtk.Entry) is window.command_entry))
+                    step["number"] = 57
                     app.quit()
                     return False
                 if controls_only and step["number"] == 0:
@@ -1665,10 +1694,11 @@ def run_smoke(args, controls_only=False, capture_only=False):
                 job.cancel.set()
         if app.result == 0:
             if capture_only:
-                assert step["number"] == 55
+                assert step["number"] == 57
                 print(json.dumps({"screenshots": ["/tmp/workspace-commander.png",
                                                    "/tmp/workspace-address-focused.png",
-                                                   "/tmp/workspace-command-focused.png"]}), flush=True)
+                                                   "/tmp/workspace-command-focused.png",
+                                                   "/tmp/workspace-command-no-action.png"]}), flush=True)
             elif controls_only:
                 assert step["number"] == 52
                 print(json.dumps({"checks": checks,

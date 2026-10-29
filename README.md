@@ -245,7 +245,9 @@ search again; Escape or Close returns to the original folder. This search finds
   and opens its output, while `cd`, `cd ..`, `cd -`, and `cd /path` change the
   active pane. Backspace removes the last command character while focus is on a
   browser pane.
-  Up / Down in the command line recall commands; Escape returns to the pane.
+  Up / Down in the command line recall commands and keep focus there when
+  history is empty. An unavailable history step briefly brightens the command
+  entry; Escape returns to the pane.
 - Ctrl+5: toggle a large quick view in the right pane while browsing the left;
   View > Preview and info expands its details
 - Ctrl+F1 / Ctrl+F2: open Places for the left / right pane. Inside a pane menu,
@@ -323,7 +325,8 @@ env -u DISPLAY -u XAUTHORITY GDK_BACKEND=wayland python3 -m tests.smoke --captur
 
 The command opens a disposable native window, waits for both file panes to
 settle, saves `/tmp/workspace-commander.png`,
-`/tmp/workspace-address-focused.png` and `/tmp/workspace-command-focused.png`,
+`/tmp/workspace-address-focused.png`, `/tmp/workspace-command-focused.png` and
+`/tmp/workspace-command-no-action.png`,
 and exits. Inspect those files with an
 image viewer or `view_image`; their pixel values can also be checked with
 Pillow. In a sandboxed Codex session, run the command with desktop access

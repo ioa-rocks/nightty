@@ -59,6 +59,8 @@ class Window(Gtk.ApplicationWindow):
         self.command_history = []
         self.command_history_index = None
         self.command_saved_input = ""
+        self.command_no_action_keys = set()
+        self.command_no_action_clear_source = 0
         self.command_terminal = None
         self.command_refresh_pending = False
         self.output_return_mode = "files"
@@ -187,7 +189,11 @@ class Window(Gtk.ApplicationWindow):
         self.command_entry.set_placeholder_text("")
         self.command_entry.set_tooltip_text("Run a shell command in the active pane's folder")
         self.command_entry.connect("activate", self.execute_command_line)
-        connect_key(self.command_entry, self.command_entry_key)
+        command_keys = connect_key(self.command_entry, self.command_entry_key)
+        command_keys.connect("key-released", self.command_entry_key_released)
+        command_focus = Gtk.EventControllerFocus.new()
+        command_focus.connect("leave", lambda *_: self.clear_command_no_action())
+        self.command_entry.add_controller(command_focus)
         self.command_row.pack_start(self.command_entry, True, True, 0)
         outer.pack_start(self.command_row, False, False, 0)
         self.space_cache = {}
@@ -1287,16 +1293,24 @@ class Window(Gtk.ApplicationWindow):
             self.command_history_index = None
             self.focus_active_browser()
             return True
-        if key == "Up" and self.command_history:
+        if key in {"Up", "KP_Up"}:
+            if not self.command_history or self.command_history_index == 0:
+                self.show_command_no_action(key)
+                return True
+            self.clear_command_no_action()
             if self.command_history_index is None:
                 self.command_saved_input = self.command_entry.get_text()
                 self.command_history_index = len(self.command_history) - 1
             else:
-                self.command_history_index = max(0, self.command_history_index - 1)
+                self.command_history_index -= 1
             self.command_entry.set_text(self.command_history[self.command_history_index])
             self.command_entry.set_position(-1)
             return True
-        if key == "Down" and self.command_history_index is not None:
+        if key in {"Down", "KP_Down"}:
+            if self.command_history_index is None:
+                self.show_command_no_action(key)
+                return True
+            self.clear_command_no_action()
             self.command_history_index += 1
             if self.command_history_index >= len(self.command_history):
                 self.command_history_index = None
@@ -1307,6 +1321,32 @@ class Window(Gtk.ApplicationWindow):
             self.command_entry.set_position(-1)
             return True
         return False
+
+    def show_command_no_action(self, key):
+        if self.command_no_action_clear_source:
+            GLib.source_remove(self.command_no_action_clear_source)
+            self.command_no_action_clear_source = 0
+        self.command_no_action_keys.add(key)
+        self.command_entry.add_css_class("command-no-action")
+
+    def command_entry_key_released(self, _controller, keyval, _keycode, _state):
+        key = Gdk.keyval_name(keyval)
+        self.command_no_action_keys.discard(key)
+        if not self.command_no_action_keys and self.command_entry.has_css_class("command-no-action"):
+            self.command_no_action_clear_source = GLib.timeout_add(120, self.finish_command_no_action)
+
+    def finish_command_no_action(self):
+        self.command_no_action_clear_source = 0
+        if not self.command_no_action_keys:
+            self.command_entry.remove_css_class("command-no-action")
+        return False
+
+    def clear_command_no_action(self):
+        if self.command_no_action_clear_source:
+            GLib.source_remove(self.command_no_action_clear_source)
+            self.command_no_action_clear_source = 0
+        self.command_no_action_keys.clear()
+        self.command_entry.remove_css_class("command-no-action")
 
     def change_directory_from_command(self, command):
         try:

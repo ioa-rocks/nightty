@@ -99,6 +99,7 @@ textview, textview text { background:$surface; color:$foreground; font-size:${ui
 entry.command-entry { background:$surface; background-image:none; border:0; border-radius:0; box-shadow:none; outline:0; padding:2px; }
 entry.command-entry:focus,
 entry.command-entry:focus-within { background-image:linear-gradient(to top, $focus 0px, $focus 2px, transparent 2px); }
+entry.command-entry.command-no-action { background-color:$dialog_background; }
 .pane-active { border-top:2px solid $accent; }
 .pane-inactive { border-top:2px solid $surface; }
 .file-split > separator { min-width:2px; background:$background; border-left:2px solid $border; border-right:2px solid $border; }
