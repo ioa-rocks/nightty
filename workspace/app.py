@@ -1452,7 +1452,22 @@ class Window(Gtk.ApplicationWindow):
             self.set_mode(return_mode if return_mode != "console" else "files",
                           preserve_project_return=True)
         else:
+            if self.mode in {"files", "gallery"}:
+                self.sync_shell_to_active_pane()
             self.set_mode("console")
+
+    def sync_shell_to_active_pane(self):
+        terminal = self.shells.current
+        if (terminal is None or terminal.workspace_exited or self.active is None
+                or self.shells.has_foreground_program(terminal)):
+            return
+        self.shells.update_cwd(terminal)
+        folder = self.active.path
+        if terminal.workspace_cwd == folder:
+            return
+        terminal.workspace_pending.append(f"cd {shlex.quote(str(folder))}\n")
+        terminal.workspace_cwd = folder
+        self.shells.flush_commands(terminal)
 
     def mode_shortcut(self, key):
         key = (key or "").lower()

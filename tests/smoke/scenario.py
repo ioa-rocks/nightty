@@ -206,7 +206,27 @@ def run_smoke(args, controls_only=False, capture_only=False):
                     assert (window.active is left and window.command_entry.get_text() == "x"
                             and (focus is window.command_entry
                                  or focus.get_ancestor(Gtk.Entry) is window.command_entry))
+                    left.navigate(child / "assets")
                     step["number"] = 57
+                    return True
+                if capture_only and step["number"] == 57:
+                    terminal = window.shells.current
+                    if (window.panes[0].path != child / "assets" or not terminal.workspace_ready
+                            or terminal.workspace_pending or window.shells.has_foreground_program(terminal)):
+                        return True
+                    window.panes[0].view.grab_focus()
+                    assert window.key(window, argparse.Namespace(
+                        keyval=Gdk.KEY_o, state=Gdk.ModifierType.CONTROL_MASK))
+                    assert window.mode == "console" and terminal.workspace_cwd == child / "assets"
+                    step["number"] = 58
+                    return True
+                if capture_only and step["number"] == 58:
+                    terminal = window.shells.current
+                    pid = next(pid for candidate, pid in window.shells.terminals if candidate is terminal)
+                    if Path(os.readlink(f"/proc/{pid}/cwd")) != child / "assets":
+                        return True
+                    assert terminal.workspace_cwd == child / "assets"
+                    step["number"] = 59
                     app.quit()
                     return False
                 if controls_only and step["number"] == 0:
@@ -1694,7 +1714,7 @@ def run_smoke(args, controls_only=False, capture_only=False):
                 job.cancel.set()
         if app.result == 0:
             if capture_only:
-                assert step["number"] == 57
+                assert step["number"] == 59
                 print(json.dumps({"screenshots": ["/tmp/workspace-commander.png",
                                                    "/tmp/workspace-address-focused.png",
                                                    "/tmp/workspace-command-focused.png",

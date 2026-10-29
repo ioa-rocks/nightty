@@ -65,7 +65,8 @@ optional agent backend. The existing browser AgentConsole remains independent.
   command line: typing from either browser pane enters it. Enter runs a command
   in that tab's shell from the active pane's folder, and a simple `cd` changes
   that pane's folder. Commands show the shell while they run. At a shell prompt,
-  Ctrl+O switches between shell and the tab's previous view. While another program
+  Ctrl+O switches between shell and the tab's previous view. From Files or Gallery,
+  it brings an idle shell to the active pane's folder. While another program
   owns the terminal, Ctrl+O goes to that program, including through SSH.
   Browser navigation itself never injects commands into a running shell or
   agent. Typing `exit` in the final shell tab quits Nightty. Hiding the window
@@ -223,7 +224,8 @@ search again; Escape or Close returns to the original folder. This search finds
 - The current Shell, Commander or Project mode appears as a dropdown in the top
   bar; each pane header exposes Sort, View and Locations, with Find inside the path.
 - Ctrl+O: switch the current tab between its shell and previous view at the
-  shell prompt. During a foreground program, it goes to that program instead;
+  shell prompt, syncing an idle shell to the active pane's folder. During a
+  foreground program, it goes to that program instead;
   Ctrl+Shift+O always sends a literal Ctrl+O to the terminal.
 - Ctrl+Enter or Shift+Enter sends a newline (the same byte as Ctrl+J) to the
   terminal, including Codex's composer. In Codex, Ctrl+V requests an image
