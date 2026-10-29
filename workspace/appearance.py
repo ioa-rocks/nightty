@@ -14,7 +14,7 @@ PALETTE_KEYS = {
     "image", "video", "audio", "document", "source", "data", "archive",
     "symlink", "executable",
 }
-OPTIONAL_PALETTE_KEYS = {"terminal_foreground", "terminal_background", "marked",
+OPTIONAL_PALETTE_KEYS = {"terminal_foreground", "terminal_background", "marked", "focus",
                          "dialog_background"}
 FONT_SIZES = {"ui_px", "files_px", "small_px", "heading_px"}
 HEX_COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
@@ -34,10 +34,14 @@ headerbar button.transfer-alert { background:#a83f32; color:#ffffff; font-weight
 button { border-radius:2px; padding:4px 8px; }
 button:checked { background:$accent; color:$accent_text; }
 button.pane-header-control { background:transparent; background-image:none; color:$muted; border:0; box-shadow:none; border-radius:4px; min-width:32px; min-height:32px; padding:3px; }
+.pane-toolbar > button.pane-header-control { min-width:28px; padding:2px; }
 button.pane-header-control:hover,
-button.pane-header-control:focus { background:$surface; color:$foreground; }
+button.pane-header-control:focus { background:$background; color:$foreground; }
+.pane-toolbar { background:$surface; }
 button.pane-address-control { min-width:28px; min-height:28px; margin:2px; }
-entry.pane-address-entry { padding-left:36px; padding-right:36px; border-radius:4px; }
+entry.pane-address-entry { background:$surface; background-image:none; border:0; border-radius:0; box-shadow:none; outline:0; padding-left:8px; padding-right:36px; }
+entry.pane-address-entry:focus,
+entry.pane-address-entry:focus-within { background-image:linear-gradient(to top, $focus 0px, $focus 2px, transparent 2px); }
 .pane-menu-item { min-width:260px; padding:6px 12px; }
 window.mc-dialog { background:$dialog_background; color:$foreground; border:3px solid $accent; border-radius:0; box-shadow:none; font-family:'$family'; }
 .mc-dialog-content { background:$dialog_background; }
@@ -92,7 +96,9 @@ textview, textview text { background:$surface; color:$foreground; font-size:${ui
 .footer-folder-stats { color:$subtle; font-family:'$family'; font-size:${small_px}px; }
 .command-row { background:$surface; padding:3px 6px; }
 .command-prompt { color:$accent; font-family:'$family'; font-size:${files_px}px; }
-entry.command-entry { background:transparent; border:0; box-shadow:none; padding:2px; }
+entry.command-entry { background:$surface; background-image:none; border:0; border-radius:0; box-shadow:none; outline:0; padding:2px; }
+entry.command-entry:focus,
+entry.command-entry:focus-within { background-image:linear-gradient(to top, $focus 0px, $focus 2px, transparent 2px); }
 .pane-active { border-top:2px solid $accent; }
 .pane-inactive { border-top:2px solid $surface; }
 .file-split > separator { min-width:2px; background:$background; border-left:2px solid $border; border-right:2px solid $border; }
@@ -144,7 +150,7 @@ def stylesheet(appearance):
                     "dialog_message_px": fonts["ui_px"] + 4,
                     "dialog_detail_px": fonts["ui_px"] + 2,
                     "dialog_button_px": fonts["ui_px"] + 4}
-    palette = {"marked": "#b58900",
+    palette = {"marked": "#b58900", "focus": "#cb4b16",
                "dialog_background": appearance["palette"].get("dialog_background", appearance["palette"]["background"])}
     return CSS.substitute(palette | appearance["palette"] | fonts | dialog_sizes |
                           {"file_text_px": file_text_px}).encode()

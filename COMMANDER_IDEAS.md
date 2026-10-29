@@ -49,14 +49,14 @@ Working ideas for Nightty. No implementation decisions are locked in here.
 
 Compact layout now in use:
 
-`[n] [list] [☆ /current/path ⌕]`
+`[n] [list] [☆] [/current/path ⌕]`
 
 - The sort character shows the key and direction: lowercase for ascending,
   uppercase for descending. Click it to choose name, extension, size, modified,
   or created time; repeating a sort reverses direction. Each pane retains its
   choice when switching views or tabs.
 - The monochrome list/grid symbol opens Files, Gallery, and Info choices. The
-  star floats inside the editable path, opens locations and favourites, and
+  star sits beside the editable path, opens locations and favourites, and
   fills when the current folder is saved. The magnifier at the other end of
   the path opens Find Files. The controls stay flat until hovered or focused.
 - Each popup points to the control that opened it. Keep the menu focused while

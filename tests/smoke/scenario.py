@@ -150,6 +150,11 @@ def run_smoke(args, controls_only=False, capture_only=False):
                     assert all(pane.view.get_tooltip_column() == -1 and not pane.view.get_has_tooltip()
                                for pane in window.panes)
                     assert window.panes[0].sort_button.get_tooltip_text()
+                    controls = window.panes[0]
+                    assert controls.sort_button.get_next_sibling() is controls.view_button
+                    assert controls.view_button.get_next_sibling() is controls.locations_button
+                    assert controls.locations_button.get_next_sibling() is controls.location_bar
+                    assert controls.locations_button.get_parent() is controls.location_bar.get_parent()
                     right = window.panes[1]
                     placeholder = Gtk.TreePath.new_from_indices([1])
                     assert not right.store[placeholder][3]
@@ -160,7 +165,19 @@ def run_smoke(args, controls_only=False, capture_only=False):
                     real = Gtk.TreePath.new_from_indices([0])
                     assert right.cursor_logical() == 0 and right.view.path_is_selected(real)
                     assert not right.view.path_is_selected(placeholder)
+                    window.panes[1].location.grab_focus()
                     step["number"] = 53
+                    return True
+                if capture_only and step["number"] == 53:
+                    if screenshot("address-focused") is None:
+                        return True
+                    window.command_entry.grab_focus()
+                    step["number"] = 54
+                    return True
+                if capture_only and step["number"] == 54:
+                    if screenshot("command-focused") is None:
+                        return True
+                    step["number"] = 55
                     app.quit()
                     return False
                 if controls_only and step["number"] == 0:
@@ -169,9 +186,10 @@ def run_smoke(args, controls_only=False, capture_only=False):
                     assert pane.sort_button.get_label() == "n"
                     assert pane.view_button.get_icon_name() == "view-list-symbolic"
                     assert pane.sort_button.get_next_sibling() is pane.view_button
-                    assert pane.view_button.get_next_sibling() is pane.location_bar
+                    assert pane.view_button.get_next_sibling() is pane.locations_button
+                    assert pane.locations_button.get_next_sibling() is pane.location_bar
                     assert pane.location_bar.get_child() is pane.location
-                    assert pane.locations_button.get_parent() is pane.location_bar
+                    assert pane.locations_button.get_parent() is pane.view_button.get_parent()
                     assert pane.find_button.get_parent() is pane.location_bar
                     assert isinstance(pane.find_button.get_child(), Gtk.Image)
                     assert "Alt+F7" in pane.find_button.get_tooltip_text()
@@ -1647,8 +1665,10 @@ def run_smoke(args, controls_only=False, capture_only=False):
                 job.cancel.set()
         if app.result == 0:
             if capture_only:
-                assert step["number"] == 53
-                print(json.dumps({"screenshots": ["/tmp/workspace-commander.png"]}), flush=True)
+                assert step["number"] == 55
+                print(json.dumps({"screenshots": ["/tmp/workspace-commander.png",
+                                                   "/tmp/workspace-address-focused.png",
+                                                   "/tmp/workspace-command-focused.png"]}), flush=True)
             elif controls_only:
                 assert step["number"] == 52
                 print(json.dumps({"checks": checks,

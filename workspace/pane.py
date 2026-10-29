@@ -25,7 +25,9 @@ class Pane(Box):
         self.sort_key = "name"
         self.sort_reverse = False
         self.created_loaded = False
-        toolbar = Box(spacing=5, margin=7)
+        toolbar = Box(spacing=2, margin=7)
+        toolbar.add_css_class("pane-toolbar")
+        toolbar.set_margin_end(2)
         self.sort_button = button("n", lambda: self.window.show_pane_menu(self, "sort", self.sort_button))
         self.sort_button.set_has_frame(False)
         self.sort_button.add_css_class("pane-header-control")
@@ -49,11 +51,8 @@ class Pane(Box):
         self.locations_button.set_has_frame(False)
         self.locations_button.connect("clicked", lambda *_: self.window.show_locations(self))
         self.locations_button.add_css_class("pane-header-control")
-        self.locations_button.add_css_class("pane-address-control")
         self.locations_button.set_tooltip_text("Locations and favourites (Ctrl+F1 / Ctrl+F2)")
-        self.locations_button.set_halign(Gtk.Align.START)
-        self.locations_button.set_valign(Gtk.Align.CENTER)
-        self.location_bar.add_overlay(self.locations_button)
+        toolbar.pack_start(self.locations_button, False, False, 0)
         self.find_button = Gtk.Button()
         self.find_button.set_child(Gtk.Image.new_from_icon_name("edit-find-symbolic"))
         self.find_button.set_has_frame(False)

@@ -30,8 +30,9 @@ optional agent backend. The existing browser AgentConsole remains independent.
   separates panes and a single line separates filename columns. Clicking blank
   pane space focuses
   the nearest entry. Each pane header starts with a flat one-letter sort control
-  and a monochrome list/gallery control. A location star and Find magnifier sit
-  inside the editable path field. Lowercase sort letters mean ascending, uppercase descending:
+  and a monochrome list/gallery control. A location star sits beside them;
+  the Find magnifier sits inside the editable path field. Lowercase sort letters
+  mean ascending, uppercase descending:
   n/N for name, e/E for extension, s/S for size, m/M for modified time, and c/C
   for available creation time. Locations include Home, the filesystem root, mounts
   that expose a local path, favourites and recent folders.
@@ -104,6 +105,7 @@ replacing them is follow-up work for GTK 5 readiness.
 `python3 -m workspace` launches at the default size unless given that option.
 
 Colors, font sizes and file name weight live in [appearance.json](appearance.json).
+The Commander address and command-line focus underlines use `palette.focus`.
 The terminal uses the configured font family, pixel size and weight. The file
 list uses the same font with a quarter-pixel raster adjustment that preserves
 capital strokes without increasing row height. The default
@@ -219,7 +221,7 @@ search again; Escape or Close returns to the original folder. This search finds
 - Ctrl+PageUp / Ctrl+PageDown: move between workspace tabs; Ctrl+Shift+T: new
   shell tab. All tabs have the same shell controls.
 - The current Shell, Commander or Project mode appears as a dropdown in the top
-  bar; each pane header exposes Sort and View, with locations and Find inside the path.
+  bar; each pane header exposes Sort, View and Locations, with Find inside the path.
 - Ctrl+O: switch the current tab between its shell and previous view at the
   shell prompt. During a foreground program, it goes to that program instead;
   Ctrl+Shift+O always sends a literal Ctrl+O to the terminal.
@@ -265,7 +267,7 @@ search again; Escape or Close returns to the original folder. This search finds
   a mark without moving. F5 copies and F6 moves marked files, or the cursor file.
 - Alt+Up: parent; Ctrl+L: edit the active path; Ctrl+H: hidden files
 - Ctrl+D: star or unstar the active directory
-- The star inside either path: choose Home, a usable mount, favourite or recent
+- The star beside either path: choose Home, a usable mount, favourite or recent
   folder, or type a path. Its menu toggles the current folder's favourite status.
 - F3: inspect a selected file or folder; F4: open with the default application;
   Shift+F5: copy with a same-folder filename; Shift+F6: rename in place;
@@ -320,8 +322,10 @@ env -u DISPLAY -u XAUTHORITY GDK_BACKEND=wayland python3 -m tests.smoke --captur
 ```
 
 The command opens a disposable native window, waits for both file panes to
-settle, saves `/tmp/workspace-commander.png`, and exits. Inspect that file with
-an image viewer or `view_image`; its pixel values can also be checked with
+settle, saves `/tmp/workspace-commander.png`,
+`/tmp/workspace-address-focused.png` and `/tmp/workspace-command-focused.png`,
+and exits. Inspect those files with an
+image viewer or `view_image`; their pixel values can also be checked with
 Pillow. In a sandboxed Codex session, run the command with desktop access
 outside the sandbox: the workspace sandbox blocks the Wayland and session-bus
 sockets, so GTK cannot open a display there. Clearing the X11 variables keeps
