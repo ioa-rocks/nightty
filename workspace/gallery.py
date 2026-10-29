@@ -203,11 +203,6 @@ class Gallery:
             context.set_source_rgba(background.red, background.green, background.blue, background.alpha)
             context.rectangle(0, bottom, self.flow.get_allocated_width(), height - bottom)
             context.fill()
-        border = Gdk.RGBA()
-        border.parse(self.window.palette["border"])
-        context.set_source_rgba(border.red, border.green, border.blue, border.alpha)
-        context.rectangle(0, 0, 2, height)
-        context.fill()
         return False
 
     def scroll_changed(self):

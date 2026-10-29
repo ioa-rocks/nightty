@@ -505,7 +505,7 @@ class Window(Gtk.ApplicationWindow):
             suffix = " · folder contents excluded" if folders else ""
             pane.status.add_css_class("footer-marked")
             pane.status.set_text(f"{count} {noun}{'' if count == 1 else 's'} selected  ·  {self.size(total)}{suffix}")
-            pane.status.set_tooltip_text("Folder contents are not included in the size" if folders else "")
+            pane.status.set_tooltip_text("Folder contents are not included in the size" if folders else None)
             return
         if selected:
             selected_path = next(iter(selected))
@@ -513,7 +513,7 @@ class Window(Gtk.ApplicationWindow):
             pane.status.add_css_class("footer-marked")
         else:
             pane.status.remove_css_class("footer-marked")
-        pane.status.set_tooltip_text("")
+        pane.status.set_tooltip_text(None)
         if row is None:
             pane.status.set_text("No file selected")
             return

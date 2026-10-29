@@ -80,7 +80,12 @@ textview, textview text { background:$surface; color:$foreground; font-size:${ui
 .heading { font-size:${heading_px}px; font-weight:600; color:$foreground; }
 .section { font-size:${small_px}px; font-weight:600; color:$muted; }
 .pane-list-rule { background:$border; min-height:2px; }
+.pane-content-left { border-left:2px solid $border; }
+.pane-content-right { border-right:2px solid $border; }
 .footer-box { background:$surface; border:1px solid $border; padding:3px 8px; }
+.footer-box.pane-footer-left, .footer-box.pane-footer-right { border-top-width:0; }
+.footer-box.pane-footer-left { border-left-width:2px; border-right-width:0; }
+.footer-box.pane-footer-right { border-left-width:0; border-right-width:2px; }
 .footer-details { color:$foreground; font-family:'$family'; font-size:${small_px}px; }
 .footer-marked { color:$marked; font-family:'$family'; font-size:${small_px}px; font-weight:700; }
 .footer-folder { color:$muted; font-family:'$family'; font-size:${small_px}px; }
@@ -90,7 +95,7 @@ textview, textview text { background:$surface; color:$foreground; font-size:${ui
 entry.command-entry { background:transparent; border:0; box-shadow:none; padding:2px; }
 .pane-active { border-top:2px solid $accent; }
 .pane-inactive { border-top:2px solid $surface; }
-.file-split > separator { min-width:6px; background-image:linear-gradient(to right, $border 0%, $border 33%, $background 33%, $background 67%, $border 67%, $border 100%); }
+.file-split > separator { min-width:2px; background:$background; border-left:2px solid $border; border-right:2px solid $border; }
 .inspector-details { background:$surface; border-left:1px solid $border; padding:18px; }
 .gallery-tile { background:$surface; border:1px solid $border; border-radius:3px; padding:8px; }
 flowboxchild { border:2px solid transparent; }

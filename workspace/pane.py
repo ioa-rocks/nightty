@@ -97,7 +97,6 @@ class Pane(Box):
         self.results_row.hide()
         self.store = Gtk.ListStore(str, str, str, str, str)
         self.view = Gtk.IconView(model=self.store)
-        self.view.set_tooltip_column(3)
         self.view.set_selection_mode(Gtk.SelectionMode.MULTIPLE)
         self.view.set_columns(2)
         self.view.set_item_width(300)
@@ -163,7 +162,7 @@ class Pane(Box):
         self.view.add_attribute(renderer, "text", 1)
         self.view.set_cell_data_func(renderer, self.name_color)
         connect_key(self.view, self.move_by_key, capture=True)
-        connect_click(self.view, self.focus_nearest_on_blank)
+        connect_click(self.view, self.focus_nearest_on_blank, capture=True)
         connect_focus(self.view, lambda *_: self.window.activate_pane(self))
         self.view.connect("item-activated", self.open)
         self.cursor_handler = self.view.connect("selection-changed", self.selected)
@@ -173,6 +172,7 @@ class Pane(Box):
         self.scroll_overlay = drawing_overlay(self.scroll, self.draw_column_divider)
         self.content_stack = Gtk.Stack()
         self.content_stack.set_vhomogeneous(False)
+        self.content_stack.add_css_class("pane-content-left" if self.index == 0 else "pane-content-right")
         self.content_stack.add_named(self.scroll_overlay, "files")
         self.list_start = Box()
         self.list_start.add_css_class("pane-list-rule")
@@ -185,6 +185,7 @@ class Pane(Box):
         self.pack_start(self.list_end, False, False, 0)
         self.status_box = Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
         self.status_box.add_css_class("footer-box")
+        self.status_box.add_css_class("pane-footer-left" if self.index == 0 else "pane-footer-right")
         self.status = label("", "footer-details")
         self.status.set_selectable(False)
         # Keep the footer steady when a fallback font has taller CJK glyphs.
@@ -640,7 +641,9 @@ class Pane(Box):
         if event.button == 3:
             path = self.view.get_path_at_pos(int(event.x), int(event.y))
             if path is None or not self.store[path][3]:
-                return False
+                self.window.activate_pane(self, update=self.window.active is not self)
+                self.view.grab_focus()
+                return True
             self.window.activate_pane(self)
             self.view.grab_focus()
             self.view.unselect_all()
@@ -668,7 +671,12 @@ class Pane(Box):
                       if nearby else len(self.entries) - 1)
         else:
             target = self.nearest_logical(path.get_indices()[0])
-        cursor = Gtk.TreePath.new_from_indices([self.store_position(target)])
+        position = self.store_position(target)
+        if position is None and self.store_to_logical:
+            position = self.store_position(max(self.store_to_logical.values()))
+        if position is None:
+            return True
+        cursor = Gtk.TreePath.new_from_indices([position])
         self.view.handler_block(self.cursor_handler)
         self.view.unselect_all()
         self.view.set_cursor(cursor, None, False)
@@ -1130,7 +1138,6 @@ class Pane(Box):
         # IconView places column two before the viewport midpoint when it
         # reserves room for a scrollbar. Match the outer border's marker gap.
         x = self.view.get_item_width() + self.file_column_spacing + self.prefix_xpad
-        context.rectangle(0, 0, 2, height)
         context.rectangle(x, 0, 2, height)
         context.fill()
         return False
@@ -1155,6 +1162,21 @@ class Pane(Box):
         return False
 
     def selected(self, *_):
+        cursor = self.view.get_cursor()[1]
+        invalid = [path for path in self.view.get_selected_items()
+                   if path.get_indices()[0] not in self.store_to_logical]
+        invalid_cursor = cursor is not None and cursor.get_indices()[0] not in self.store_to_logical
+        if self.entries and (invalid or invalid_cursor):
+            source = invalid[0] if invalid else cursor
+            position = self.store_position(self.nearest_logical(source.get_indices()[0]))
+            if position is not None:
+                path = Gtk.TreePath.new_from_indices([position])
+                self.view.handler_block(self.cursor_handler)
+                for empty in invalid:
+                    self.view.unselect_path(empty)
+                self.view.set_cursor(path, None, False)
+                self.view.select_path(path)
+                self.view.handler_unblock(self.cursor_handler)
         if self.logical_to_stores and self.scroll.get_vadjustment().get_value() >= 0:
             top = self.visible_top()
             visible = {self.store_to_logical[position]

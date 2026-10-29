@@ -312,6 +312,21 @@ repository root,
 uses disposable files and fake agents, exercises native navigation, preview,
 copying and terminal output, and saves screenshots under `/tmp/`.
 
+For a repeatable Commander screenshot, run this from the repository root in a
+desktop session:
+
+```sh
+env -u DISPLAY -u XAUTHORITY GDK_BACKEND=wayland python3 -m tests.smoke --capture
+```
+
+The command opens a disposable native window, waits for both file panes to
+settle, saves `/tmp/workspace-commander.png`, and exits. Inspect that file with
+an image viewer or `view_image`; its pixel values can also be checked with
+Pillow. In a sandboxed Codex session, run the command with desktop access
+outside the sandbox: the workspace sandbox blocks the Wayland and session-bus
+sockets, so GTK cannot open a display there. Clearing the X11 variables keeps
+the capture on Wayland and avoids a stale X11 authentication cookie.
+
 ## License
 
 Nightty's code, documentation, configuration and bundled artwork are licensed

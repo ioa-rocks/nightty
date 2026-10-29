@@ -80,9 +80,11 @@ def connect_focus(widget, callback):
     return controller
 
 
-def connect_click(widget, callback):
+def connect_click(widget, callback, *, capture=False):
     gesture = Gtk.GestureClick.new()
     gesture.set_button(0)
+    if capture:
+        gesture.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
 
     def pressed(controller, _count, x, y):
         event = argparse.Namespace(button=controller.get_current_button(),
@@ -90,7 +92,9 @@ def connect_click(widget, callback):
                                    state=controller.get_current_event_state(),
                                    x=x, y=y,
                                    gdk_event=controller.get_current_event())
-        callback(widget, event)
+        handled = callback(widget, event)
+        if capture and handled:
+            controller.set_state(Gtk.EventSequenceState.CLAIMED)
 
     gesture.connect("pressed", pressed)
     widget.add_controller(gesture)

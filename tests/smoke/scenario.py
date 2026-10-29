@@ -25,7 +25,7 @@ from .fakes import FakeAgents
 from .fixtures import build
 
 
-def run_smoke(args, controls_only=False):
+def run_smoke(args, controls_only=False, capture_only=False):
     """Run the scenario and return the process exit status."""
     with tempfile.TemporaryDirectory(prefix="workspace-native-fixture-") as directory:
         fixtures = build(Path(directory))
@@ -144,6 +144,25 @@ def run_smoke(args, controls_only=False):
                                             or abs(window.file_panes.get_position() /
                                                    window.file_panes.get_width() - .5) >= .02):
                     return True
+                if capture_only and step["number"] == 0:
+                    if screenshot("commander") is None:
+                        return True
+                    assert all(pane.view.get_tooltip_column() == -1 and not pane.view.get_has_tooltip()
+                               for pane in window.panes)
+                    assert window.panes[0].sort_button.get_tooltip_text()
+                    right = window.panes[1]
+                    placeholder = Gtk.TreePath.new_from_indices([1])
+                    assert not right.store[placeholder][3]
+                    right.view.unselect_all()
+                    right.view.set_cursor(placeholder, None, False)
+                    right.view.select_path(placeholder)
+                    right.selected()
+                    real = Gtk.TreePath.new_from_indices([0])
+                    assert right.cursor_logical() == 0 and right.view.path_is_selected(real)
+                    assert not right.view.path_is_selected(placeholder)
+                    step["number"] = 53
+                    app.quit()
+                    return False
                 if controls_only and step["number"] == 0:
                     pane = window.panes[0]
                     assert window.workspace_button.get_label() == "Commander ▾"
@@ -1627,7 +1646,10 @@ def run_smoke(args, controls_only=False):
             for job in app.window.operations.jobs:
                 job.cancel.set()
         if app.result == 0:
-            if controls_only:
+            if capture_only:
+                assert step["number"] == 53
+                print(json.dumps({"screenshots": ["/tmp/workspace-commander.png"]}), flush=True)
+            elif controls_only:
                 assert step["number"] == 52
                 print(json.dumps({"checks": checks,
                                   "screenshots": ["/tmp/workspace-terminal-start.png",
