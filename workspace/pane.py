@@ -42,7 +42,7 @@ class Pane(Box):
         self.location_bar = Gtk.Overlay()
         self.location = Gtk.Entry()
         self.location.add_css_class("pane-address-entry")
-        self.location.set_text(str(self.path))
+        self.location.set_text(self.window.display_path(self.path))
         self.location.set_width_chars(4)
         self.location.set_tooltip_text(str(self.path))
         self.location.connect("activate", lambda entry: self.navigate(Path(entry.get_text()).expanduser()))
@@ -233,7 +233,7 @@ class Pane(Box):
         if path != self.path:
             self.previous_path = self.path
         self.path = path
-        self.location.set_text(str(path))
+        self.location.set_text(self.window.display_path(path))
         self.location.set_tooltip_text(str(path))
         self.count.set_text("Loading…")
         announced = hasattr(self.window, "active") and hasattr(self.window, "status")

@@ -330,6 +330,16 @@ class Window(Gtk.ApplicationWindow):
             self.pane_split_ratio = position / width
 
     size = staticmethod(format_size)
+
+    @staticmethod
+    def display_path(folder):
+        folder = Path(folder)
+        try:
+            relative = folder.relative_to(Path.home())
+        except ValueError:
+            return str(folder)
+        return "~" if relative == Path(".") else f"~/{relative}"
+
     def async_call(self, operation, callback, error=None, executor=None):
         future = (executor or self.pool).submit(operation)
 
@@ -394,7 +404,8 @@ class Window(Gtk.ApplicationWindow):
                 folder = browser["paths"][browser["active"]]
             folder = folder or terminal.workspace_browser["paths"][0]
             suffix = " · done" if terminal.workspace_exited else ""
-            control.set_label(str(folder) + suffix)
+            control.set_label((self.display_path(folder) if mode in {"files", "gallery"}
+                               else str(folder)) + suffix)
             control.get_child().set_ellipsize(Pango.EllipsizeMode.MIDDLE)
             control.get_child().set_max_width_chars(24)
             control.set_tooltip_text(str(folder))
@@ -442,12 +453,7 @@ class Window(Gtk.ApplicationWindow):
     def update_command_prompt(self):
         folder = (self.active.path if self.active is not None else
                   self.initial_browser_state["paths"][self.initial_browser_state["active"]])
-        home = Path.home()
-        try:
-            relative = folder.relative_to(home)
-            display = "~" if relative == Path(".") else f"~/{relative}"
-        except ValueError:
-            display = str(folder)
+        display = self.display_path(folder)
         user = os.environ.get("USER") or str(os.geteuid())
         host = socket.gethostname().split(".")[0]
         prompt = f"{user}@{host}:{display}{'#' if os.geteuid() == 0 else '$'}"
@@ -456,7 +462,7 @@ class Window(Gtk.ApplicationWindow):
 
     def refresh_folder_footer(self, pane, request_space=False):
         folder = str(pane.path)
-        pane.folder_path.set_text(folder)
+        pane.folder_path.set_text(self.display_path(pane.path))
         pane.folder_path.set_tooltip_text(folder)
         space = self.space_cache.get(folder, "checking space…")
         pane.folder_stats.set_text(f"{pane.count.get_text()}  ·  {space}")

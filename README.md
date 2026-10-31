@@ -10,9 +10,10 @@ optional agent backend. The existing browser AgentConsole remains independent.
 - Each top-bar tab owns a persistent shell and starts in Shell view. Keyboard
   shortcuts switch that tab to MC-style files, Gallery, or Project; switching
   tabs restores its view and browser folders. Each tab shows its current folder,
-  truncated in the header with the full path in a tooltip. File panes are
-  created on first use, and Gallery controls and thumbnails are created only
-  when requested. Shell tabs do not scan folders for unopened browser views.
+  truncated in the header with the full path in a tooltip. Commander and Gallery
+  use `~` for home and `~/…` for its children in pane paths and tab labels.
+  File panes are created on first use, and Gallery controls and thumbnails are
+  created only when requested. Shell tabs do not scan folders for unopened browser views.
   Ctrl+PageUp / Ctrl+PageDown cycle tabs. The compact ⇄ button opens background
   transfers. Exiting a shell closes its tab.
 - Files mode: two independent directory panes in a compact Midnight Commander
