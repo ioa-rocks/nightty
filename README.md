@@ -105,6 +105,17 @@ replacing them is follow-up work for GTK 5 readiness.
 
 `./run.sh` starts Nightty maximized by passing `--maximized`; direct
 `python3 -m workspace` launches at the default size unless given that option.
+On Wayland, Nightty defaults to GTK's OpenGL renderer because the default
+Vulkan renderer causes a dma-buf import error on the development desktop.
+Set `GSK_RENDERER` explicitly to override this choice.
+
+If the normal window will not open, launch `./run.sh --safe-mode` or
+`nightty --safe-mode`. The installed application menu also has **Nightty
+Recovery Terminal**. Recovery mode uses GTK's Cairo software renderer and a
+minimal VTE window running `/bin/sh`; it starts independently of the normal
+Nightty instance and does not load the file browser, agents, or appearance
+configuration. A failed normal launch also opens it automatically. Close the
+recovery shell with `exit`.
 
 Colors, font sizes and file name weight live in [appearance.json](appearance.json).
 The Commander address and command-line focus underlines use `palette.focus`.

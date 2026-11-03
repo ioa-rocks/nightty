@@ -5,6 +5,12 @@ import argparse
 import os
 from pathlib import Path
 import sys
+import traceback
+
+# This Wayland stack rejects dma-bufs from GTK's default Vulkan renderer.
+# GL works here; an explicit renderer selection still takes precedence.
+if os.environ.get("WAYLAND_DISPLAY"):
+    os.environ.setdefault("GSK_RENDERER", "gl")
 
 from .app import Gio, Gtk, Window
 from .model import State
@@ -33,8 +39,14 @@ class Application(Gtk.Application):
 
     def do_activate(self):
         if self.window is None:
-            state = State(self.args.state)
-            self.window = Window(self, self.args, state, client=self.client)
+            try:
+                state = State(self.args.state)
+                self.window = Window(self, self.args, state, client=self.client)
+            except Exception:
+                traceback.print_exc()
+                self.result = 1
+                self.quit()
+                return
         self.window.show()
         self.window.present()
 
@@ -79,4 +91,5 @@ def main():
     args = parser().parse_args()
     args.left = args.left or args.directory
     app = Application(args)
-    return app.run(sys.argv)
+    status = app.run(sys.argv)
+    return app.result or status

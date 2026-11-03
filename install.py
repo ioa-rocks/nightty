@@ -19,10 +19,13 @@ def main():
     source = Path(__file__).resolve().parent
     launcher = Path.home() / ".local/bin/nightty"
     desktop = Path.home() / ".local/share/applications/pw.blackbird.SurfaceWorkspace.desktop"
+    recovery_desktop = Path.home() / ".local/share/applications/pw.blackbird.NighttyRecovery.desktop"
     desktop_text = desktop.read_text() if desktop.exists() else ""
     owned_desktop = "X-Surface-Workspace=true" in desktop_text
     if desktop.exists() and not owned_desktop:
         raise SystemExit("An unrelated desktop entry already exists")
+    if recovery_desktop.exists() and "X-Surface-Workspace=true" not in recovery_desktop.read_text():
+        raise SystemExit("An unrelated recovery desktop entry already exists")
     command = shlex.quote(str(source / "run.sh"))
     previous = "#!/bin/sh\nexec " + command + ' "$@"\n'
     expected = "#!/bin/sh\nexec " + command + ' --toggle "$@"\n'
@@ -50,6 +53,11 @@ def main():
         f"Comment=Files, projects and embedded terminals\nIcon={source / 'assets/nightty-icon-constellation.png'}\n"
         f"Exec={launcher}\nTerminal=false\nCategories=Utility;FileManager;\n"
         "StartupWMClass=pw.blackbird.SurfaceWorkspace\nX-Surface-Workspace=true\n")
+    recovery_desktop.write_text("[Desktop Entry]\nType=Application\nName=Nightty Recovery Terminal\n"
+        "Comment=Minimal terminal with software rendering\n"
+        f"Icon={source / 'assets/nightty-icon-constellation.png'}\n"
+        f"Exec={launcher} --safe-mode\nTerminal=false\nCategories=System;TerminalEmulator;\n"
+        "StartupWMClass=pw.blackbird.NighttyRecovery\nX-Surface-Workspace=true\n")
     print(f"Launcher installed: {launcher}")
     if not args.shortcut:
         return
