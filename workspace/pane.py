@@ -1132,7 +1132,7 @@ class Pane(Box):
         context.rectangle(0, visible_bottom, self.view.get_allocated_width(), height - visible_bottom)
         context.fill()
         color = Gdk.RGBA()
-        color.parse(self.window.palette["border"])
+        color.parse(self.window.palette["directory"])
         context.set_source_rgba(color.red, color.green, color.blue, color.alpha)
         # IconView places column two before the viewport midpoint when it
         # reserves room for a scrollbar. Match the outer border's marker gap.
